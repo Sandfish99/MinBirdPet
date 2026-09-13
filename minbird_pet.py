@@ -493,9 +493,12 @@ def _sq(s: str) -> str:
 
 
 # 系统媒体会话（SMTC）：网易云 / QQ音乐 / Spotify 等主流播放器都接入了，
-# 不用装任何依赖，问 Windows 就知道"现在谁在放什么歌"。输出 "歌手|歌名" 或空。
+# 不用装任何依赖，问 Windows 就知道"现在谁在放什么歌"。
+# 输出约定：SMTC_NONE = 会话正常但没在放；SMTC_META|歌手|歌名 = 在放；
+# 空输出 = 这台机器读不到元数据（部分系统 WinRT 投影缺类型）→ 走窗口标题兜底。
 MUSIC_SMTC_PS = r"""
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
 function Await($WinRtTask, $ResultType) {
@@ -504,15 +507,26 @@ function Await($WinRtTask, $ResultType) {
   $netTask.Wait(-1) | Out-Null
   $netTask.Result
 }
-$mgr = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime])
+$mgrType = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime]
+$mgr = Await ($mgrType::RequestAsync()) $mgrType
 $s = $mgr.GetSessions() | Where-Object { $_.PlaybackStatus -eq 'Playing' } | Select-Object -First 1
-if ($s) {
-  $i = Await ($s.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsMediaProperties,Windows.Media.Control,ContentType=WindowsRuntime])
-  Write-Output ("{0}|{1}" -f $i.Artist, $i.Title)
-} else {
-  Write-Output ""
+if (-not $s) { Write-Output "SMTC_NONE"; exit 0 }
+$propsType = [Windows.Media.Control.GlobalSystemMediaTransportControlsMediaProperties,Windows.Media.Control,ContentType=WindowsRuntime]
+$i = Await ($s.TryGetMediaPropertiesAsync()) $propsType
+Write-Output ("SMTC_META|{0}|{1}" -f $i.Artist, $i.Title)
+""".strip()
+
+# 兜底：部分机器 WinRT 投影读不到歌曲元数据，改看播放器窗口标题
+# （QQ音乐/网易云等的窗口标题就是"歌名 - 歌手"）。
+MUSIC_TITLES_PS = r"""
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Get-Process | Where-Object { $_.MainWindowTitle } | ForEach-Object {
+  Write-Output ("{0}::{1}" -f $_.ProcessName, $_.MainWindowTitle)
 }
 """.strip()
+
+PLAYER_PROCESSES = ("qqmusic", "cloudmusic", "kugou", "kuwo", "kwmusic",
+                    "spotify", "netease", "orpheus")
 
 AESPA_KEYS = ("aespa", "에스파")
 
@@ -520,6 +534,33 @@ AESPA_KEYS = ("aespa", "에스파")
 def _match_aespa(artist: str, title: str) -> bool:
     hay = f"{artist} {title}".lower()
     return any(k in hay for k in AESPA_KEYS)
+
+
+def _query_music() -> bool:
+    """有没有在放 aespa：先问系统媒体会话，读不到再看播放器窗口标题。"""
+    try:
+        line = (_ps(MUSIC_SMTC_PS, timeout=15).stdout or "").strip()
+    except Exception:
+        line = ""
+    if line.startswith("SMTC_META|"):
+        parts = line.split("|", 2)
+        if len(parts) == 3 and _match_aespa(parts[1], parts[2]):
+            return True
+        return False   # SMTC 可信：在放但不是 aespa
+    try:
+        lines = (_ps(MUSIC_TITLES_PS, timeout=15).stdout or "").splitlines()
+    except Exception:
+        return False
+    for raw in lines:
+        proc, _, title = raw.partition("::")
+        if not title or " - " not in title:
+            continue
+        if not any(p in proc.lower() for p in PLAYER_PROCESSES):
+            continue
+        left, _, right = title.strip().rpartition(" - ")
+        if left and _match_aespa(left, right):
+            return True
+    return False
 
 
 def boot_signature() -> str:
@@ -2154,16 +2195,12 @@ class MinBirdApp:
         self.pet.say("设置保存好啦", 2.5)
 
     def _music_loop(self) -> None:
-        """每 5 秒问一次系统媒体会话（SMTC，纯本地查询不联网）：
+        """每 5 秒查一次（纯本地：SMTC 优先，读不到就看播放器窗口标题）：
         发现 aespa 在放就通知主线程开跳。"""
         while True:
             if self._dance_enabled:
                 try:
-                    line = (_ps(MUSIC_SMTC_PS, timeout=20).stdout or "").strip()
-                    playing = False
-                    if "|" in line:
-                        artist, title = line.split("|", 1)
-                        playing = _match_aespa(artist, title)
+                    playing = _query_music()
                     if playing != self._music_playing:
                         self._music_playing = playing
                         self.outbox.put(("ok", "music", "1" if playing else "0", {}))
