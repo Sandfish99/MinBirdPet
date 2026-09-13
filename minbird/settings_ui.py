@@ -275,7 +275,8 @@ class Api:
 
 def open_settings(store, defaults, log_path) -> None:
     """在当前进程主线程运行设置窗口（阻塞至关闭）。由 --settings 入口调用。"""
+    api = Api(store, defaults, log_path, None)
     window = webview.create_window("珉鸟设置", html=HTML, width=560, height=680,
-                                   min_size=(480, 560))
-    api = Api(store, defaults, log_path, window)
+                                   min_size=(480, 560), js_api=api)
+    api._window = window
     webview.start(gui="edgechromium")
