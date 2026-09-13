@@ -102,11 +102,56 @@ def unit_logging() -> bool:
     return True
 
 
+def unit_config_store() -> bool:
+    sys.path.insert(0, str(ROOT))
+    import json, os, tempfile
+    from minbird.config_store import ConfigStore
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "config.json")
+        st = ConfigStore(path, defaults=[("city", ""), ("balance_step", 1.0)])
+
+        # 原子写：首写无备份，二写起 .bak 出现
+        assert st.write_atomic({"city": ""})
+        assert st.write_atomic({"city": "济南"})
+        data, broken = st.read()
+        assert data["city"] == "济南" and not broken
+        assert os.path.exists(path + ".bak"), "第二次写起应生成备份"
+
+        # 主文件损坏：契约是不自动覆盖，只报 broken
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{ broken json")
+        data, broken = st.load_with_recovery()
+        assert broken and data == {}
+
+        # 显式恢复：.bak 写回主路径（.bak 是上一次成功写入的版本），坏文件留证
+        assert st.restore_from_backup()
+        data, broken = st.read()
+        assert not broken and data["city"] == ""
+        assert os.path.exists(path + ".broken"), "坏文件应留证"
+
+        # 损坏且无备份：restore 失败，保持 broken
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{ still broken")
+        os.remove(path + ".bak")
+        assert st.restore_from_backup() is False
+        data, broken = st.load_with_recovery()
+        assert broken and data == {}
+
+        # 迁移：v0 → v1（数值规范化 + 版本号）
+        data, changed = st.migrate({"balance_step": "2", "size": "232", "x": "10"})
+        assert changed and data["config_version"] == 1
+        assert data["balance_step"] == 2.0 and data["size"] == 232 and data["x"] == 10.0
+        data2, changed2 = st.migrate(data)
+        assert not changed2, "已迁移的不应再改"
+    return True
+
+
 def main() -> int:
     print(f"== MinBirdPet 回归测试 ({PY}) ==")
     run("unit: aespa 匹配", unit_aespa_match)
     run("unit: 日期文案", unit_date_line)
     run("unit: 日志轮转与崩溃清理", unit_logging)
+    run("unit: 配置存储（原子/备份/迁移）", unit_config_store)
     run("unit: 序列帧开关", unit_seq_toggle)
     run("回归: 配置文件不被覆盖", cmd=["tools/test_config.py"])
     run("回归: selftest 渲染", cmd=["minbird_pet.py", "--selftest"])

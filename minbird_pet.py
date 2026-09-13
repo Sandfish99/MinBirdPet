@@ -144,6 +144,7 @@ from minbird.platform.boot import boot_signature  # noqa: F401
 from minbird.settings_ui import SettingsWindow  # noqa: F401
 from minbird.logging_setup import (  # noqa: F401 —— 日志与崩溃捕获
     install_excepthook, log_line, write_crash_report)
+from minbird.config_store import ConfigStore  # 配置原子写/备份/迁移
 from minbird.platform.tasks import TASK_NAME, balance_task_enabled, set_balance_task  # noqa: F401
 
 SPRITE_CANDIDATES = ("minbird.png", "minbird_flip.png")
@@ -374,6 +375,7 @@ class MinBirdApp:
         self._config_broken = False   # 配置文件 JSON 坏了就别写盘，保住用户内容
         self._config_mtime = None
         self._last_cfg_check = 0.0
+        self._store = ConfigStore(CONFIG_PATH, CONFIG_DEFAULTS, log=log_line)
         self.config = self._load_config()
         self._ensure_config_file()
         try:
@@ -436,45 +438,38 @@ class MinBirdApp:
     USER_FIELDS = ("deepseek_api_key", "city")
 
     def _read_disk_config(self) -> dict:
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
-                raw = fh.read()
-        except OSError:
-            return {}
-        try:
-            data = json.loads(raw)
-        except ValueError:
+        data, broken = self._store.read()
+        if broken:
             # 用户编辑到一半 / JSON 写坏了 —— 这时候千万不能覆盖文件，
             # 否则他填的 Key 就没了。记个标记，整个会话都别写盘。
             self._config_broken = True
             return {}
-        return data if isinstance(data, dict) else {}
+        return data
 
     def _write_config(self, data: dict) -> None:
         if getattr(self, "_config_broken", False):
             return
-        try:
-            os.makedirs(CONFIG_DIR, exist_ok=True)
-            with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
-                json.dump(data, fh, ensure_ascii=False, indent=2)
-        except OSError:
-            return
+        self._store.write_atomic(data)
         try:
             self._config_mtime = os.path.getmtime(CONFIG_PATH)
         except OSError:
             pass
 
     def _load_config(self) -> dict:
-        return self._read_disk_config()
+        # 启动时：损坏可从 .bak 自动恢复；随后按 config_version 迁移
+        data, broken = self._store.load_with_recovery()
+        if broken:
+            self._config_broken = True
+            return data
+        data, migrated = self._store.migrate(data)
+        if migrated and not self._store.write_atomic(data):
+            log_line("config migrate write failed")
+        return data
 
     def _ensure_config_file(self) -> None:
         """保证配置文件存在且带默认字段，方便直接填 API Key。"""
         data = self._read_disk_config()
-        changed = False
-        for key, default in CONFIG_DEFAULTS:
-            if key not in data:
-                data[key] = default
-                changed = True
+        data, changed = self._store.ensure_defaults(data)
         if changed or not os.path.exists(CONFIG_PATH):
             self._write_config(data)
         for key, default in CONFIG_DEFAULTS:
