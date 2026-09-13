@@ -138,6 +138,9 @@ from minbird.core.music import match_aespa as _match_aespa  # noqa: F401 —— 
 from minbird.platform.music import query_music as _query_music  # noqa: F401
 from minbird.platform.proc import _ps, _run, _sq  # noqa: F401 —— 子进程适配
 from minbird.platform.surfaces import PERCH_SNAP, WindowSurfaces  # noqa: F401 —— 平台适配层
+from minbird.platform.autostart import autostart_enabled, autostart_target, set_autostart  # noqa: F401
+from minbird.platform.boot import boot_signature  # noqa: F401
+from minbird.platform.tasks import TASK_NAME, balance_task_enabled, set_balance_task  # noqa: F401
 
 SPRITE_CANDIDATES = ("minbird.png", "minbird_flip.png")
 ICON_CANDIDATES = ("minbird.ico",)
@@ -249,104 +252,6 @@ def _out(msg: str) -> None:
     log_line("check-balance:", msg)
 
 
-# Windows 计划任务名。用它来跑定期的余额检查 —— 系统唤醒进程、查完就走，
-# 珉鸟自己不需要常驻一个轮询循环。
-TASK_NAME = "MinBirdPet-BalanceCheck"
-
-
-_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-
-def boot_signature() -> str:
-    """本次开机的签名（系统上次启动时间）；拿不到就返回空。"""
-    try:
-        r = _ps("(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('s')",
-                timeout=25)
-        return (getattr(r, "stdout", "") or "").strip()
-    except Exception:
-        return ""
-
-
-def _date_line() -> str:
-    t = time.localtime()
-    return f"{t.tm_mon}月{t.tm_mday}日 周{'一二三四五六日'[t.tm_wday]}"
-
-
-def balance_task_enabled() -> bool:
-    # 先试 schtasks；少数机器禁用了 schtasks.exe，再用 PowerShell cmdlet
-    try:
-        if _run(["schtasks", "/query", "/tn", TASK_NAME], timeout=10).returncode == 0:
-            return True
-    except Exception:
-        pass
-    try:
-        r = _ps(f"if (Get-ScheduledTask -TaskName '{_sq(TASK_NAME)}' "
-                f"-ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}")
-        return r.returncode == 0
-    except Exception:
-        return False
-
-
-def _task_schtasks(enable: bool, hours: int) -> tuple:
-    try:
-        if enable:
-            tr = f'"{sys.executable}" --check-balance'
-            cmd = ["schtasks", "/create", "/tn", TASK_NAME, "/tr", tr,
-                   "/sc", "hourly", "/mo", str(hours), "/f"]
-        else:
-            cmd = ["schtasks", "/delete", "/tn", TASK_NAME, "/f"]
-        r = _run(cmd)
-        if r.returncode == 0:
-            return True, "已开启" if enable else "已关闭"
-        detail = (r.stderr or r.stdout or "").strip().splitlines()
-        return False, detail[-1] if detail else f"退出码 {r.returncode}"
-    except Exception as exc:  # noqa: BLE001
-        return False, str(exc) or "schtasks 调不动"
-
-
-def _task_powershell(enable: bool, hours: int) -> tuple:
-    name, exe = _sq(TASK_NAME), _sq(sys.executable)
-    if enable:
-        script = (
-            "$ErrorActionPreference='Stop';"
-            f"$a=New-ScheduledTaskAction -Execute '{exe}' -Argument '--check-balance';"
-            "$t=New-ScheduledTaskTrigger -Once -At (Get-Date) "
-            f"-RepetitionInterval (New-TimeSpan -Hours {hours}) "
-            "-RepetitionDuration ([TimeSpan]::MaxValue);"
-            f"Register-ScheduledTask -TaskName '{name}' -Action $a -Trigger $t -Force "
-            "| Out-Null; exit 0"
-        )
-    else:
-        script = (
-            "$ErrorActionPreference='Stop';"
-            f"Unregister-ScheduledTask -TaskName '{name}' -Confirm:$false | Out-Null; exit 0"
-        )
-    try:
-        r = _ps(script)
-        if r.returncode == 0:
-            return True, "已开启" if enable else "已关闭"
-        detail = (r.stderr or r.stdout or "").strip().splitlines()
-        return False, detail[-1] if detail else f"退出码 {r.returncode}"
-    except Exception as exc:  # noqa: BLE001
-        return False, str(exc) or "PowerShell 调不动"
-
-
-def set_balance_task(enable: bool, hours: int = 1) -> tuple:
-    """创建 / 删除余额定期检查的计划任务。返回 (ok, 说明)。
-
-    两条路都试：schtasks.exe（绝大多数机器可用）→ PowerShell cmdlet（兜底）。
-    两条都不通就把原因原样报给用户在气泡里，不静默失败。
-    """
-    hours = max(1, min(24, int(hours)))
-    ok, msg = _task_schtasks(enable, hours)
-    if ok:
-        return True, msg
-    ok2, msg2 = _task_powershell(enable, hours)
-    if ok2:
-        return True, msg2
-    return False, msg2 or msg
-
-
 def check_balance_once(verbose: bool = False) -> int:
     """一次性的余额检查（--check-balance）。查完就退出，不留任何后台连接。
 
@@ -356,8 +261,6 @@ def check_balance_once(verbose: bool = False) -> int:
         with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
             cfg = json.load(fh)
     except (OSError, ValueError):
-        cfg = {}
-    if not isinstance(cfg, dict):
         cfg = {}
 
     key = (cfg.get("deepseek_api_key") or "").strip()
@@ -408,6 +311,11 @@ def check_balance_once(verbose: bool = False) -> int:
 
 
 LOG_PATH = os.path.join(CONFIG_DIR, "minbird_pet.log")
+
+
+def _date_line() -> str:
+    t = time.localtime()
+    return f"{t.tm_mon}月{t.tm_mday}日 周{'一二三四五六日'[t.tm_wday]}"
 
 
 def log_line(*parts) -> None:
@@ -461,56 +369,6 @@ def load_sprite_seq() -> tuple | None:
         return frames, left, float(m.get("fps", 24.0))
     except Exception:
         return None
-
-
-def autostart_target() -> str:
-    """Command line used for the Run registry entry."""
-    if getattr(sys, "frozen", False):
-        return f'"{os.path.abspath(sys.executable)}"'
-    script = os.path.join(BASE_DIR, "minbird_pet.py")
-    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-    exe = pyw if os.path.exists(pyw) else sys.executable
-    return f'"{exe}" "{script}"'
-
-
-def autostart_enabled() -> bool:
-    import winreg
-
-    key = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
-            val, _ = winreg.QueryValueEx(k, "MinBirdPet")
-            return bool(val)
-    except OSError:
-        return False
-
-
-def set_autostart(enable: bool) -> bool:
-    import winreg
-
-    key = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    try:
-        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as k:
-            if enable:
-                winreg.SetValueEx(k, "MinBirdPet", 0, winreg.REG_SZ, autostart_target())
-            else:
-                try:
-                    winreg.DeleteValue(k, "MinBirdPet")
-                except FileNotFoundError:
-                    pass
-        return True
-    except OSError:
-        return False
-
-
-# --------------------------------------------------------------------------
-# 可站立的窗口表面
-#
-# 把「可见应用窗口的顶边（标题栏）」也当成珉鸟脚下的地面。z 序、透明穿透层、
-# UWP 挂起窗口、桌面和任务栏都过滤掉，只留真正看得见、站得上去的正常窗口。
-# --------------------------------------------------------------------------
-GROUND_TOL = 10.0    # 站立判定：脚点下方 2px、上方 10px 以内的窗沿都算踩着
-RIDE_SNAP = 56.0     # 窗口被拖动、顶边一帧抬高 56px 以内时，鸟直接跟着上去
 
 
 # --------------------------------------------------------------------------
