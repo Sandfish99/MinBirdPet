@@ -39,6 +39,7 @@
 摸摸头
 ☑ 自己散步        ← 点一下切换（关掉就乖乖站着）
 ☑ 能在窗口上走     ← 站/走在应用窗口的标题栏上（关掉就只待任务栏）
+☑ 待机动画        ← 呼吸/眨眼/歪头序列帧（关掉回静态图，选择会被记住）
 尺寸：中（点击切换）  ← 小 / 中 / 大 / 特大 循环
 ☑ 总在最前
 ☐ 开机自启        ← 点一下写入/移除注册表启动项
@@ -93,7 +94,7 @@ MinBirdPet/
 
 运行时产生的文件（不在本目录）：
 
-- 配置：`%APPDATA%\MinBirdPet\config.json`（位置、尺寸、散步开关、窗口行走开关）
+- 配置：`%APPDATA%\MinBirdPet\config.json`（位置、尺寸、散步开关、窗口行走开关、待机动画开关）
 - 日志：`%APPDATA%\MinBirdPet\minbird_pet.log`（加 `--debug` 启动时写入）
 
 ## 四、命令行参数
@@ -101,7 +102,7 @@ MinBirdPet/
 ```
 MinBirdPet.exe --size 232        指定初始高度（像素），默认 168
 MinBirdPet.exe --no-walk         不要自己散步
-MinBirdPet.exe --static          不用序列帧动画，回退静态图模式
+MinBirdPet.exe --static          本次启动先关掉待机动画（右键菜单里可再打开）
 MinBirdPet.exe --debug           写运行日志，便于排错
 MinBirdPet.exe --selftest        只渲染一张姿态预览图，不开窗口
 ```
@@ -263,7 +264,8 @@ DeepSeek 余额
 - **序列帧待机动画**：待机时的呼吸、眨眼、歪头来自绿幕 AI 视频的切帧
   （`tools/make_seq.py` 一条龙：去水印 → 色键抠像 → 无缝循环搜索 → spritesheet），
   运行时按 24 fps 循环播放；拖拽甩动、抛掷弹跳的物理变形仍由程序实时叠加在当前帧上。
-  删掉 `assets/seq/` 或加 `--static` 即回到静态图模式。
+  右键菜单「待机动画」可随时切换静态/动态（选择记在配置 `seq_anim` 里），
+  删掉 `assets/seq/` 或加 `--static` 也能回到静态图模式。
 - **CPU**：30 fps，单帧合成约 4–7 ms（不同尺寸），托盘常驻、无界面时不占资源。
 
 ## 九、参考与致谢

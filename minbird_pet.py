@@ -146,6 +146,7 @@ ID_SETTINGS = 1011
 ID_BALSTEP = 1012
 ID_BALTASK = 1013
 ID_WINDOWWALK = 1014
+ID_SEQANIM = 1015
 
 TIMER_ID = 1
 
@@ -926,7 +927,7 @@ class Pet:
         self.display_w = max(1, int(round(self.sprite_src.width * scale)))
         self.base_right = self.sprite_src.resize((self.display_w, self.display_h), Image.LANCZOS)
         self.base_left = self.base_right.transpose(Image.FLIP_LEFT_RIGHT)
-        if self.seq_mode:
+        if self.seq is not None:
             dw, dh = self.display_w, self.display_h
             self.seq_right = [f.resize((dw, dh), Image.LANCZOS) for f in self.seq[0]]
             self.seq_left = [f.resize((dw, dh), Image.LANCZOS) for f in self.seq[1]]
@@ -940,6 +941,16 @@ class Pet:
         self.tile_w = self.display_w + 2 * self.pad_x
         self.tile_h = self.display_h + 2 * self.pad_y
         self.foot_in_tile = (self.pad_x + self.display_w / 2, self.pad_y + self.display_h)
+
+    def set_seq_mode(self, on: bool) -> bool:
+        """开/关序列帧待机动画。返回是否生效（没有素材时开不了）。"""
+        if on:
+            if self.seq is None:
+                return False
+            self.seq_mode = True
+        else:
+            self.seq_mode = False
+        return True
 
     def place(self, fx: float, fy: float) -> None:
         self.fx, self.fy = fx, fy
@@ -1299,14 +1310,19 @@ class MinBirdApp:
         sprite = Image.open(sprite_path).convert("RGBA")
         sprite = sprite.crop(sprite.getchannel("A").getbbox() or (0, 0, *sprite.size))
 
-        # 序列帧模式（assets/seq/ 由 tools/make_seq.py 生成）--static 可强制关掉
-        seq = None if getattr(options, "static", False) else load_sprite_seq()
+        # 序列帧素材（assets/seq/ 由 tools/make_seq.py 生成）。素材恒加载，
+        # 用不用由菜单「待机动画」开关（seq_anim）决定；--static 只影响首次默认值。
+        seq = load_sprite_seq()
         if seq is not None:
-            sprite = seq[0][0]  # 用第 0 帧定宽高比
+            sprite = seq[0][0]  # 用第 0 帧定宽高比，动画/静态切换不跳尺寸
 
         options.size = self.config.get("size", options.size)
         options.walk = self.config.get("walk", options.walk)
         self.pet = Pet(sprite, options, seq=seq)
+        if seq is not None:
+            # --static = 本次启动强制静态（排障用）；平时由配置 seq_anim 决定
+            self.pet.seq_mode = (not getattr(options, "static", False)) and \
+                bool(self.config.get("seq_anim", True))
         self.pet.set_size(options.size)
         self.surfaces = WindowSurfaces()
         self.pet.surfaces = self.surfaces
@@ -1590,9 +1606,11 @@ class MinBirdApp:
         top = MF_CHECKED if self.topmost else 0
         auto = MF_CHECKED if autostart_enabled() else 0
         wwin = MF_CHECKED if self.config.get("window_walk", True) else 0
+        anim = MF_CHECKED if self.pet.seq_mode else 0
         user32.AppendMenuW(menu, MF_STRING, ID_REACT, "摸摸头")
         user32.AppendMenuW(menu, MF_STRING | walk, ID_TOGGLE_WALK, "自己散步")
         user32.AppendMenuW(menu, MF_STRING | wwin, ID_WINDOWWALK, "能在窗口上走")
+        user32.AppendMenuW(menu, MF_STRING | anim, ID_SEQANIM, "待机动画")
         user32.AppendMenuW(menu, MF_STRING, ID_CYCLE_SIZE,
                            f"尺寸：{self._size_label()}（点击切换）")
         user32.AppendMenuW(menu, MF_STRING | top, ID_TOPMOST, "总在最前")
@@ -1646,6 +1664,13 @@ class MinBirdApp:
                 self.pet.say("好耶，窗台也能走啦", 3.5)
             else:
                 self.pet.say("那我只待在任务栏上", 3.5)
+        elif cmd == ID_SEQANIM:
+            new = not self.pet.seq_mode
+            if self.pet.set_seq_mode(new):
+                self._set_config_value("seq_anim", new)
+                self.pet.say("好耶，动起来" if new else "那我安安静静待着", 2.5)
+            else:
+                self.pet.say("找不到动画素材啦", 2.5)
         elif cmd == ID_CYCLE_SIZE:
             sizes = [px for _, px in SIZE_PRESETS]
             idx = (sizes.index(self.pet.display_h) + 1) % len(sizes) if self.pet.display_h in sizes else 1
