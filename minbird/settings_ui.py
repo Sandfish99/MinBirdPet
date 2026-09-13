@@ -64,10 +64,32 @@ let items = [], values = {}, safe = false;
 let cat = "全部", q = "";
 const CATS = ["全部","宠物","行为","番茄钟","外观","高级"];
 
-window.addEventListener("DOMContentLoaded", async () => {
-  const m = await pywebview.api.get_model();
-  items = m.items; safe = m.safe;
-  renderChips(); render();
+async function boot(){
+  try {
+    const m = await pywebview.api.get_model();
+    items = m.items; values = {}; safe = m.safe;
+    if (m.broken) toast("配置文件损坏，改动将无法保存");
+    renderChips(); render();
+    pywebview.api.log_loaded(document.getElementById("list").children.length);
+  } catch (e) {
+    const list = document.getElementById("list");
+    list.innerHTML = "<div style='padding:30px;color:#c0392b'>加载失败：" + e + "</div>";
+  }
+}
+
+// pywebview 桥接在 DOMContentLoaded 之后才注入，必须等 pywebviewready
+window.addEventListener("pywebviewready", boot);
+window.addEventListener("DOMContentLoaded", () => {
+  if (window.pywebview && pywebview.api) boot();
+  else { let n = 0;
+    const t = setInterval(() => {
+      n += 1;
+      if (window.pywebview && pywebview.api) { clearInterval(t); boot(); }
+      else if (n > 40) { clearInterval(t);
+        document.getElementById("list").innerHTML =
+          "<div style='padding:30px;color:#c0392b'>桥接初始化超时</div>"; }
+    }, 100);
+  }
 });
 
 function toast(t){ const el = document.getElementById("toast");
@@ -189,6 +211,11 @@ class Api:
                 data[key] = sr.coerce(item, value)
         self.store.write_atomic(data)   # 珉鸟进程的配置监听 2 秒内自动应用
         return "OK"
+
+    def log_loaded(self, count: int) -> None:
+        """HTML 启动完成后回报渲染行数（诊断：桥接/渲染是否正常）。"""
+        from minbird.logging_setup import log_line
+        log_line("settings ui loaded,", count, "rows")
 
     def run_action(self, action: str):
         if action == "backup":
