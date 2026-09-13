@@ -277,6 +277,7 @@ def main() -> int:
     run("兼容: 全屏检测", cmd=["tools/verify_fullscreen.py"])
     run("兼容: 点击穿透实测", cmd=["tools/verify_clickthrough.py"])
     run("兼容: RDP/VM 环境探测", unit_env_detect)
+    run("兼容: 便携性/权限审计", cmd=["tools/audit_portable.py"])
     run("unit: 序列帧开关", unit_seq_toggle)
     run("回归: 配置文件不被覆盖", cmd=["tools/test_config.py"])
     run("回归: selftest 渲染", cmd=["minbird_pet.py", "--selftest"])
