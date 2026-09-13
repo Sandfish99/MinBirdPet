@@ -146,12 +146,33 @@ def unit_config_store() -> bool:
     return True
 
 
+def unit_safemode() -> bool:
+    sys.path.insert(0, str(ROOT))
+    import json, os, tempfile
+    from minbird.core.safemode import next_streak, safe_mode_required
+    from minbird.platform.state import load_state, save_state
+    assert next_streak({}) == 0
+    assert next_streak({"clean": True}) == 0
+    assert next_streak({"clean": False, "run_streak": 2}) == 3
+    assert next_streak({"clean": False, "run_streak": "x"}) == 1
+    assert safe_mode_required(3) and not safe_mode_required(2)
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "runtime_state.json")
+        save_state(path, {"clean": False, "run_streak": 2})
+        assert load_state(path)["run_streak"] == 2
+        assert next_streak(load_state(path)) == 3
+        save_state(path, {"clean": True, "run_streak": 0})
+        assert next_streak(load_state(path)) == 0
+    return True
+
+
 def main() -> int:
     print(f"== MinBirdPet 回归测试 ({PY}) ==")
     run("unit: aespa 匹配", unit_aespa_match)
     run("unit: 日期文案", unit_date_line)
     run("unit: 日志轮转与崩溃清理", unit_logging)
     run("unit: 配置存储（原子/备份/迁移）", unit_config_store)
+    run("unit: 安全模式判定与状态文件", unit_safemode)
     run("unit: 序列帧开关", unit_seq_toggle)
     run("回归: 配置文件不被覆盖", cmd=["tools/test_config.py"])
     run("回归: selftest 渲染", cmd=["minbird_pet.py", "--selftest"])

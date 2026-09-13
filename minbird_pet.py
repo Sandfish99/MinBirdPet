@@ -141,6 +141,8 @@ from minbird.platform.surfaces import WindowSurfaces  # noqa: F401 —— 平台
 from minbird.core.pet import BUBBLE_TEXTS, PERCH_SNAP, Pet, clamp  # noqa: F401 —— 核心层
 from minbird.platform.autostart import autostart_enabled, autostart_target, set_autostart  # noqa: F401
 from minbird.platform.boot import boot_signature  # noqa: F401
+from minbird.platform.state import load_state, save_state
+from minbird.core.safemode import next_streak, safe_mode_required
 from minbird.settings_ui import SettingsWindow  # noqa: F401
 from minbird.logging_setup import (  # noqa: F401 —— 日志与崩溃捕获
     install_excepthook, log_line, write_crash_report)
@@ -375,8 +377,16 @@ class MinBirdApp:
         self._config_broken = False   # 配置文件 JSON 坏了就别写盘，保住用户内容
         self._config_mtime = None
         self._last_cfg_check = 0.0
+        self._last_tick_ok = time.perf_counter()
+        self._safe = bool(getattr(options, "safe", False))
         self._store = ConfigStore(CONFIG_PATH, CONFIG_DEFAULTS, log=log_line)
         self.config = self._load_config()
+        if self._safe and getattr(self, "_config_broken", False):
+            # 安全模式允许"显式"从 .bak 恢复配置（正常模式按契约绝不自动覆盖）
+            if self._store.restore_from_backup():
+                self._config_broken = False
+                self.config = self._load_config()
+                log_line("safe mode: config restored from .bak")
         self._ensure_config_file()
         try:
             self._config_mtime = os.path.getmtime(CONFIG_PATH)
@@ -387,12 +397,14 @@ class MinBirdApp:
         self.outbox = queue.Queue()
         self.info = minbird_info.InfoService(self.outbox)
 
-        # 设置窗口 / 音乐联动 / 开机问候
+        # 设置窗口 / 音乐联动 / 开机问候（安全模式下只保留基础能力）
         self._settings = None
         self._dance_enabled = bool(self.config.get("dance_on_aespa", True))
         self._music_playing = False
         self._greet_at = None
-        threading.Thread(target=self._music_loop, daemon=True).start()
+        self._last_tick_ok = time.perf_counter()
+        if not self._safe:
+            threading.Thread(target=self._music_loop, daemon=True).start()
 
         sprite_path = find_asset(SPRITE_CANDIDATES)
         if not sprite_path:
@@ -937,6 +949,33 @@ class MinBirdApp:
             threading.Thread(target=self._toggle_balance_task, daemon=True).start()
         self.pet.say("设置保存好啦", 2.5)
 
+    def _watchdog_loop(self) -> None:
+        """看门狗：主渲染循环 60 秒无心跳 → 落盘诊断后强制退出（下次进安全模式）。
+        系统休眠/恢复期间两个时钟会失真，检测到就跳过本轮，避免误杀。"""
+        k32 = ctypes.windll.kernel32
+        last_tick64 = k32.GetTickCount64()
+        last_mono = time.perf_counter()
+        while True:
+            time.sleep(10)
+            now_tick64 = k32.GetTickCount64()
+            now_mono = time.perf_counter()
+            if abs((now_tick64 - last_tick64) / 1000.0 - (now_mono - last_mono)) > 10:
+                last_tick64, last_mono = now_tick64, now_mono
+                continue   # 休眠/恢复，时钟失真
+            last_tick64, last_mono = now_tick64, now_mono
+            if not self.visible:
+                continue   # 隐藏时主定时器本来就停着
+            if now_mono - self._last_tick_ok > 60:
+                log_line("watchdog: main loop stalled >60s; exiting")
+                try:
+                    path = os.path.join(CONFIG_DIR, "runtime_state.json")
+                    save_state(path, {"clean": False,
+                                      "run_streak": next_streak(
+                                          load_state(path)) + 1})
+                except Exception:
+                    pass
+                os._exit(3)
+
     def _music_loop(self) -> None:
         """每 5 秒查一次（纯本地：SMTC 优先，读不到就看播放器窗口+音频峰值）：
         发现 aespa 在放就通知主线程开跳。"""
@@ -1061,6 +1100,7 @@ class MinBirdApp:
     # -- render loop ------------------------------------------------------
     def _tick(self) -> None:
         now = time.perf_counter()
+        self._last_tick_ok = now
         dt = min(0.08, now - self._last_render) if self._last_render else self.TIMER_MS / 1000.0
         self._last_render = now
         self._drain_info()
@@ -1093,7 +1133,8 @@ class MinBirdApp:
             self._watch_config()
             self._drain_alerts()
         # 窗口地面：每帧同步开关，每秒刷新一次窗口列表
-        self.surfaces.enabled = bool(self.config.get("window_walk", True))
+        self.surfaces.enabled = (not self._safe) and bool(
+            self.config.get("window_walk", True))
         self.surfaces.refresh(now)
         self.pet.update(dt, now)
         frame = self.pet.compose()
@@ -1162,13 +1203,19 @@ class MinBirdApp:
         self._last_render = time.perf_counter()
         user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
         user32.SetTimer(self.hwnd, TIMER_ID, self.TIMER_MS, None)
-        # 起来 5 秒后静默查一次余额（不弹余额，只在跨过提醒台阶时才开口）
-        self._start_check_at = time.perf_counter() + 5.0
-        # 开机后第一次启动的检测要查一次系统启动时间，丢后台线程
-        threading.Thread(target=self._detect_first_boot, daemon=True).start()
+        if self._safe:
+            self.pet.set_seq_mode(False)
+            self.surfaces.enabled = False
+            self.pet.say("安全模式启动\n只保留基础功能", 8.0)
+        else:
+            # 起来 5 秒后静默查一次余额（不弹余额，只在跨过提醒台阶时才开口）
+            self._start_check_at = time.perf_counter() + 5.0
+            # 开机后第一次启动的检测要查一次系统启动时间，丢后台线程
+            threading.Thread(target=self._detect_first_boot, daemon=True).start()
         if self._log:
             self._log("shown; visible=", bool(user32.IsWindowVisible(self.hwnd)))
 
+        threading.Thread(target=self._watchdog_loop, daemon=True).start()
         msg = MSG()
         while True:
             ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
@@ -1272,6 +1319,12 @@ def _run_app(args) -> int:
         pass
 
     install_excepthook()
+    state_path = os.path.join(CONFIG_DIR, "runtime_state.json")
+    streak = next_streak(load_state(state_path))
+    safe = bool(getattr(args, "safe", False)) or safe_mode_required(streak)
+    if safe:
+        log_line("safe mode ON; run_streak=", streak)
+    save_state(state_path, {"clean": False, "run_streak": streak})
     mutex = kernel32.CreateMutexW(None, False, "MinBirdPetSingleInstance")
     err = ctypes.get_last_error()
     if args.debug:
@@ -1282,10 +1335,12 @@ def _run_app(args) -> int:
         return 0
 
     options = argparse.Namespace(size=args.size, walk=not args.no_walk,
-                                 debug=args.debug, static=args.static)
+                                 debug=args.debug, static=args.static, safe=safe)
     try:
         app = MinBirdApp(options)
         app.run()
+        # 正常退出：清零崩溃连击
+        save_state(state_path, {"clean": True, "run_streak": 0})
     except Exception:
         import traceback
 
