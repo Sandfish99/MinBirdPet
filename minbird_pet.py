@@ -71,6 +71,7 @@ from minbird.platform.win32 import (  # noqa: F401 —— 平台适配层（唯�
     ID_BALTASK,
     ID_CYCLE_SIZE,
     ID_DANCE,
+    ID_FSHIDE,
     ID_HIDE,
     ID_QUIT,
     ID_REACT,
@@ -150,6 +151,7 @@ from minbird.platform.autostart import autostart_enabled, autostart_target, set_
 from minbird.platform.boot import boot_signature  # noqa: F401
 from minbird.platform.state import load_state, save_state
 from minbird.platform.memory import current_rss_mb
+from minbird.platform.fullscreen import fullscreen_hwnd
 from minbird.platform.update_swap import apply_pending_update, has_prev_version, rollback  # noqa: F401
 from minbird.core.safemode import next_streak, safe_mode_required
 from minbird.settings_ui import SettingsWindow  # noqa: F401
@@ -397,6 +399,8 @@ class MinBirdApp:
         self._next_mem_check = 0.0
         self._MEM_LIMIT_MB = 512.0   # 超过先 gc，仍超则回退静态图
         self._mem_guard_logged = False
+        self._auto_hidden = False      # 全屏自动躲藏（区别于用户手动藏）
+        self._next_fs_check = 0.0
         self._safe = bool(getattr(options, "safe", False))
         self._store = ConfigStore(CONFIG_PATH, CONFIG_DEFAULTS, log=log_line)
         self.config = self._load_config()
@@ -782,6 +786,8 @@ class MinBirdApp:
         user32.AppendMenuW(menu, MF_STRING | wwin, ID_WINDOWWALK, "能在窗口上走")
         user32.AppendMenuW(menu, MF_STRING | anim, ID_SEQANIM, "待机动画")
         user32.AppendMenuW(menu, MF_STRING | dance, ID_DANCE, "听到 aespa 就跳舞")
+        fsh = MF_CHECKED if self.config.get("fullscreen_hide", True) else 0
+        user32.AppendMenuW(menu, MF_STRING | fsh, ID_FSHIDE, "全屏时自动躲起来")
         user32.AppendMenuW(menu, MF_STRING, ID_CYCLE_SIZE,
                            f"尺寸：{self._size_label()}（点击切换）")
         user32.AppendMenuW(menu, MF_STRING | top, ID_TOPMOST, "总在最前")
@@ -850,6 +856,10 @@ class MinBirdApp:
             else:
                 self.pet.stop_dance()
                 self.pet.say("那我就安静听歌", 2.5)
+        elif cmd == ID_FSHIDE:
+            new = not bool(self.config.get("fullscreen_hide", True))
+            self._set_config_value("fullscreen_hide", new)
+            self.pet.say("好，全屏时我躲起来" if new else "那我看全屏也不走", 2.5)
         elif cmd == ID_CYCLE_SIZE:
             sizes = [px for _, px in SIZE_PRESETS]
             idx = (sizes.index(self.pet.display_h) + 1) % len(sizes) if self.pet.display_h in sizes else 1
@@ -1207,6 +1217,25 @@ class MinBirdApp:
             self._last_cfg_check = now
             self._watch_config()
             self._drain_alerts()
+        # 全屏自动躲藏：前台全屏（游戏/视频）→ 藏；退出 → 回来
+        if now >= self._next_fs_check:
+            self._next_fs_check = now + 1.0
+            if self._auto_hidden:
+                try:
+                    if not fullscreen_hwnd(self.hwnd):
+                        user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+                        self._auto_hidden = False
+                except Exception:
+                    pass
+            elif self.visible and self.config.get("fullscreen_hide", True)                     and not self._safe:
+                try:
+                    if fullscreen_hwnd(self.hwnd):
+                        user32.ShowWindow(self.hwnd, SW_HIDE)
+                        self._auto_hidden = True
+                except Exception:
+                    pass
+        if self._auto_hidden:
+            return   # 躲藏期间跳过渲染，省合成开销
         # 内存守卫：超限先 gc，仍超就回退静态图（序列帧缓存是最大头）
         if now >= self._next_mem_check:
             self._next_mem_check = now + 60.0
