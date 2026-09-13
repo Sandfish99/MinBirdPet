@@ -232,6 +232,7 @@ def main() -> int:
     run("unit: 安全模式判定与状态文件", unit_safemode)
     run("unit: 更新交换与回滚", unit_update_swap)
     run("unit: 资源限制（RSS/提醒上限）", unit_resource_limits)
+    run("兼容: DPI 感知 PMv2", cmd=["tools/verify_dpi.py"])
     run("unit: 序列帧开关", unit_seq_toggle)
     run("回归: 配置文件不被覆盖", cmd=["tools/test_config.py"])
     run("回归: selftest 渲染", cmd=["minbird_pet.py", "--selftest"])

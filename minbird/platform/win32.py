@@ -277,6 +277,41 @@ def _bind_prototypes() -> None:
     kernel32.CreateMutexW.restype = wt.HANDLE
 
 
+
+# ---- DPI 感知（Per-Monitor V2 优先，旧系统回退系统级）----
+DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+SWP_NOZORDER = 0x0004
+WM_DPICHANGED = 0x02E0
+
+
+def enable_dpi_awareness() -> str:
+    """设置进程 DPI 感知，返回实际生效模式："PMv2" / "system"。
+
+    Per-Monitor V2（Win10 1703+）下多屏不同缩放不会糊/错位；
+    老系统自动回退 SetProcessDPIAware。
+    """
+    try:
+        user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        user32.SetProcessDpiAwarenessContext.restype = ctypes.c_void_p
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return "PMv2"
+    except Exception:
+        pass
+    try:
+        user32.SetProcessDPIAware()
+        return "system"
+    except Exception:
+        return "unavailable"
+
+
+def get_dpi_for_window(hwnd) -> int:
+    try:
+        user32.GetDpiForWindow.argtypes = [wt.HWND]
+        user32.GetDpiForWindow.restype = ctypes.c_uint
+        return int(user32.GetDpiForWindow(hwnd))
+    except Exception:
+        return 96
+
 _bind_prototypes()
 
 if hasattr(user32, "GetWindowLongPtrW"):

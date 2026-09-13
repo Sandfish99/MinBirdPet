@@ -50,6 +50,9 @@ if BASE_DIR not in sys.path:
 
 import minbird_info  # noqa: E402  —— 余额 / 天气服务
 from minbird.platform.win32 import (  # noqa: F401 —— 平台适配层（唯一 OS 出口）
+    SWP_NOZORDER,
+    WM_DPICHANGED,
+    enable_dpi_awareness,
     AC_SRC_ALPHA,
     AC_SRC_OVER,
     BITMAPINFO,
@@ -598,6 +601,17 @@ class MinBirdApp:
             if self.pet.hit(sx - wx, sy - wy):
                 return HTCLIENT
             return HTTRANSPARENT
+
+        if msg == WM_DPICHANGED:
+            # 跨屏 DPI 变化：用系统建议位置跟过去（尺寸仍是用户设定的物理像素）
+            try:
+                rect = ctypes.cast(lparam, ctypes.POINTER(RECT)).contents
+                user32.SetWindowPos(hwnd, None, rect.left, rect.top, 0, 0,
+                                    SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER)
+                log_line("dpi changed ->", wparam & 0xFFFF)
+            except Exception:
+                pass
+            return 0
 
         if msg == WM_MOUSEACTIVATE:
             return MA_NOACTIVATE
@@ -1221,7 +1235,7 @@ class MinBirdApp:
     # -- lifecycle --------------------------------------------------------
     def run(self) -> None:
         try:
-            user32.SetProcessDPIAware()
+            enable_dpi_awareness()
         except Exception:
             pass
         self.create_window()
@@ -1351,7 +1365,7 @@ def _run_app(args) -> int:
     # the pet is positioned in logical coordinates while it paints in physical
     # pixels and lands in the wrong place on scaled displays.
     try:
-        user32.SetProcessDPIAware()
+        enable_dpi_awareness()
     except Exception:
         pass
 
