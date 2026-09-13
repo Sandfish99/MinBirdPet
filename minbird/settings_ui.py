@@ -133,13 +133,13 @@ class SettingsWindow:
         cfg = self.app.config
         add = self._add
 
-        add("STATIC", "搜索：", 0, 14, 14, 44, 20, 0)
+        add("STATIC", "搜索：", 0, 14, 16, 52, 20, 0)
         h_search = add("EDIT", "", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP,
-                       60, 12, 170, 24, self.ID_SEARCH)
+                       68, 14, 164, 24, self.ID_SEARCH)
         self._controls[self.ID_SEARCH] = h_search
-        add("STATIC", "分类：", 0, 250, 14, 44, 20, 0)
+        add("STATIC", "分类：", 0, 246, 16, 52, 20, 0)
         combo = add("COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP,
-                    296, 10, 196, 160, self.ID_CAT)
+                    300, 12, 190, 160, self.ID_CAT)
         self._controls[self.ID_CAT] = combo
         cats = ("全部",) + sr.categories()
         for i, cat in enumerate(cats):
@@ -175,16 +175,16 @@ class SettingsWindow:
                 self._rows.append({"item": item, "hwnds": [lab, h],
                                    "kind": "enum"})
             elif item.type == "int":
-                lab = add("STATIC", item.label + "：", 0, 18, 0, 216, 20, 0)
+                lab = add("STATIC", item.label + "：", 0, 18, 0, 448, 20, 0)
                 h = add("EDIT", str(cfg.get(item.key, item.default)),
                         WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP,
-                        244, 0, 246, 24, cid)
+                        18, 0, 448, 24, cid)
                 self._rows.append({"item": item, "hwnds": [lab, h], "kind": "int"})
             elif item.type == "str":
-                lab = add("STATIC", item.label + "：", 0, 18, 0, 216, 20, 0)
+                lab = add("STATIC", item.label + "：", 0, 18, 0, 448, 20, 0)
                 h = add("EDIT", str(cfg.get(item.key, item.default) or ""),
                         WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP,
-                        244, 0, 246, 24, cid)
+                        18, 0, 448, 24, cid)
                 self._rows.append({"item": item, "hwnds": [lab, h], "kind": "str"})
             elif item.type == "action":
                 h = add("BUTTON", item.label, WS_TABSTOP, 18, 0, 230, 26,
@@ -212,7 +212,7 @@ class SettingsWindow:
         cats = ("全部",) + sr.categories()
         cat = cats[i_cat] if 0 <= i_cat < len(cats) else "全部"
 
-        y = 48
+        y = 52
         col = 0
         for row in self._rows:
             item = row["item"]
@@ -236,11 +236,11 @@ class SettingsWindow:
                 if col == 1:
                     col = 0
                     y += 28
-                user32.SetWindowPos(row["hwnds"][0], None, 18, y + 2, 0, 0,
+                user32.SetWindowPos(row["hwnds"][0], None, 18, y, 0, 0,
                                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
-                user32.SetWindowPos(row["hwnds"][1], None, 244, y, 0, 0,
+                user32.SetWindowPos(row["hwnds"][1], None, 18, y + 22, 0, 0,
                                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
-                y += 32
+                y += 52
         if col == 1:
             y += 28
         # 高级动作按钮（跟随过滤）

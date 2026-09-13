@@ -73,6 +73,8 @@ from minbird.platform.win32 import (  # noqa: F401 —— 平台适配层（唯�
     ID_CYCLE_SIZE,
     ID_DANCE,
     ID_FSHIDE,
+    ID_POMO_START, ID_POMO_PAUSE, ID_POMO_SKIP, ID_POMO_RESET,
+    MF_GRAYED,
     ID_HIDE,
     ID_QUIT,
     ID_REACT,
@@ -147,7 +149,8 @@ from minbird.platform.surfaces import WindowSurfaces  # noqa: F401 —— 平台
 from minbird.core.pet import BUBBLE_TEXTS, PERCH_SNAP, Pet, clamp  # noqa: F401 —— 核心层
 from minbird.core import geom
 from minbird.core.hittest import hit_test  # 逐像素命中（纯逻辑）
-from minbird.core.pomodoro import Pomodoro, PomodoroConfig
+from minbird.core.pomodoro import (FOCUS, LONG_BREAK, PAUSED, SHORT_BREAK,
+                                   Pomodoro, PomodoroConfig)
 from minbird.core import settings_registry as sr
 from minbird.core.interfaces import Rect
 from minbird.platform import monitors, win32
@@ -414,6 +417,7 @@ class MinBirdApp:
         self._last_cfg_check = 0.0
         self._last_tick_ok = time.perf_counter()
         self._next_mem_check = 0.0
+        self._last_pomo_tick = 0.0
         self._MEM_LIMIT_MB = 512.0   # 超过先 gc，仍超则回退静态图
         self._mem_guard_logged = False
         self._auto_hidden = False      # 全屏自动躲藏（区别于用户手动藏）
@@ -819,6 +823,22 @@ class MinBirdApp:
         user32.AppendMenuW(menu, MF_STRING | dance, ID_DANCE, "听到 aespa 就跳舞")
         fsh = MF_CHECKED if self.config.get("fullscreen_hide", True) else 0
         user32.AppendMenuW(menu, MF_STRING | fsh, ID_FSHIDE, "全屏时自动躲起来")
+        pomo = self.pomodoro
+        if pomo.state == "idle":
+            user32.AppendMenuW(menu, MF_STRING, ID_POMO_START, "番茄钟：开始专注")
+        else:
+            names = {FOCUS: "专注中", SHORT_BREAK: "短休中", LONG_BREAK: "长休中",
+                     PAUSED: "已暂停"}
+            rem = max(0, int(pomo.remaining_sec or 0))
+            mm, ss = divmod(rem, 60)
+            label = f"番茄钟 {names.get(pomo.state, '')} {mm:02d}:{ss:02d}"
+            user32.AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, label)
+            if pomo.state == PAUSED:
+                user32.AppendMenuW(menu, MF_STRING, ID_POMO_START, "继续番茄钟")
+            else:
+                user32.AppendMenuW(menu, MF_STRING, ID_POMO_PAUSE, "暂停番茄钟")
+            user32.AppendMenuW(menu, MF_STRING, ID_POMO_SKIP, "跳过本阶段")
+            user32.AppendMenuW(menu, MF_STRING, ID_POMO_RESET, "重置番茄钟")
         user32.AppendMenuW(menu, MF_STRING, ID_CYCLE_SIZE,
                            f"尺寸：{self._size_label()}（点击切换）")
         user32.AppendMenuW(menu, MF_STRING | top, ID_TOPMOST, "总在最前")
@@ -887,6 +907,17 @@ class MinBirdApp:
             else:
                 self.pet.stop_dance()
                 self.pet.say("那我就安静听歌", 2.5)
+        elif cmd == ID_POMO_START:
+            if self.pomodoro.state == PAUSED:
+                self.pomodoro.resume()
+            else:
+                self.pomodoro.start()
+        elif cmd == ID_POMO_PAUSE:
+            self.pomodoro.pause()
+        elif cmd == ID_POMO_SKIP:
+            self.pomodoro.skip()
+        elif cmd == ID_POMO_RESET:
+            self.pomodoro.reset()
         elif cmd == ID_FSHIDE:
             new = not bool(self.config.get("fullscreen_hide", True))
             self._set_config_value("fullscreen_hide", new)
@@ -1431,8 +1462,10 @@ class MinBirdApp:
                     self._mem_guard_logged = over
                     log_line("memory guard:", rss, "->", rss2, "MB (limit",
                              self._MEM_LIMIT_MB, ")")
-        # 番茄钟心跳（idle 时为 no-op；集成启停控制后驱动倒计时）
-        self.pomodoro.tick()
+        # 番茄钟心跳（每秒一次；idle 时为 no-op）
+        if now - self._last_pomo_tick >= 1.0:
+            self._last_pomo_tick = now
+            self.pomodoro.tick()
         # 窗口地面：每帧同步开关，每秒刷新一次窗口列表
         self.surfaces.enabled = (not self._safe) and (
             not self._degrade_reasons) and bool(
