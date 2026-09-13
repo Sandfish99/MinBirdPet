@@ -545,9 +545,9 @@ class _PROCESSENTRY32W(ctypes.Structure):
                 ("dwFlags", wt.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
 
 
-def _scan_player_windows() -> bool:
-    """兜底检测：枚举所有顶层窗口（含隐藏/托盘化），已知播放器进程的
-    窗口标题里出现 aespa（标题一般是"歌名 - 歌手"）就算在放。"""
+def _scan_player_windows() -> set:
+    """兜底检测：枚举所有顶层窗口（含隐藏/托盘化），返回标题里出现 aespa
+    （标题一般是"歌名 - 歌手"）的播放器进程 pid 集合。"""
     kernel32.CreateToolhelp32Snapshot.restype = wt.HANDLE
     snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     pids = {}
@@ -559,9 +559,7 @@ def _scan_player_windows() -> bool:
             pids[entry.th32ProcessID] = entry.szExeFile
             ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
         kernel32.CloseHandle(snap)
-    if not pids:
-        return False
-    hits = []
+    hits = set()
 
     def _on_window(hwnd, _lparam):
         pid = wt.DWORD()
@@ -574,17 +572,134 @@ def _scan_player_windows() -> bool:
                 user32.GetWindowTextW(hwnd, buf, n + 1)
                 left, sep, right = buf.value.strip().rpartition(" - ")
                 if sep and left and _match_aespa(left, right):
-                    hits.append(True)
-                    return False  # 命中，提前结束枚举
+                    hits.add(pid.value)
         return True
 
     cb = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)(_on_window)
     user32.EnumWindows(cb, 0)
-    return bool(hits)
+    return hits
+
+
+# ---- Core Audio 会话峰值表：判断播放器进程此刻是否真的在出声（暂停检测） ----
+_CLS_MMDEVICE_ENUMERATOR = "{BCDE0395-E52F-467C-8E3D-C4579291692E}"
+_IID_IMMDEVICE_ENUMERATOR = "{A95664D2-9614-4F35-A746-DE8DB63617E6}"
+_IID_IAUDIO_SESSION_MANAGER2 = "{77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F}"
+_IID_IAUDIO_SESSION_CONTROL2 = "{BFB7FF88-7239-4FC9-8FA2-07C950BE9C6D}"
+_IID_IAUDIO_METER_INFORMATION = "{C02216F6-8C67-4B5B-9D00-D008E73E0064}"
+
+
+def _guid_from_str(s: str) -> GUID:
+    g = GUID()
+    if ctypes.windll.ole32.CLSIDFromString(ctypes.c_wchar_p(s), ctypes.byref(g)) != 0:
+        raise OSError("CLSIDFromString failed")
+    return g
+
+
+def _com_method(obj, index: int, restype, *argtypes):
+    """取 COM 对象 vtable 上第 index 个方法（obj 为接口指针 c_void_p）。
+    注意先解引用槽位拿到真正的函数地址，不能把槽位地址当函数地址调用。"""
+    vtbl = ctypes.cast(obj, ctypes.POINTER(ctypes.c_void_p)).contents.value
+    fn_addr = ctypes.cast(vtbl + index * ctypes.sizeof(ctypes.c_void_p),
+                          ctypes.POINTER(ctypes.c_void_p)).contents.value
+    proto = ctypes.WINFUNCTYPE(restype, *argtypes)
+    return ctypes.cast(fn_addr, proto)
+
+
+def _com_release(obj) -> None:
+    if obj:
+        try:
+            _com_method(obj, 2, ctypes.c_ulong, ctypes.c_void_p)(obj)
+        except Exception:
+            pass
+
+
+def _process_peak(pids: set) -> float | None:
+    """这些进程在默认输出设备上的瞬时峰值（0~1，取最大）；查不到返回 None。"""
+    ole32 = ctypes.windll.ole32
+    c_void_p, byref = ctypes.c_void_p, ctypes.byref
+    p_enum, p_dev, p_mgr, p_enum_s = c_void_p(), c_void_p(), c_void_p(), c_void_p()
+    peak = None
+    try:
+        hr = ole32.CoCreateInstance(byref(_guid_from_str(_CLS_MMDEVICE_ENUMERATOR)),
+                                    None, 23,  # CLSCTX_ALL
+                                    byref(_guid_from_str(_IID_IMMDEVICE_ENUMERATOR)),
+                                    byref(p_enum))
+        if hr != 0 or not p_enum:
+            return None
+        # IMMDeviceEnumerator::GetDefaultAudioEndpoint(eRender=0, eMultimedia=1)
+        hr = _com_method(p_enum, 4, ctypes.HRESULT, c_void_p, ctypes.c_int,
+                         ctypes.c_int, ctypes.POINTER(c_void_p))(p_enum, 0, 1, byref(p_dev))
+        _com_release(p_enum)
+        if hr != 0 or not p_dev:
+            return None
+        # IMMDevice::Activate(IAudioSessionManager2)
+        hr = _com_method(p_dev, 3, ctypes.HRESULT, c_void_p, GUID, ctypes.c_uint,
+                         c_void_p, ctypes.POINTER(c_void_p))(
+            p_dev, _guid_from_str(_IID_IAUDIO_SESSION_MANAGER2), 23, None, byref(p_mgr))
+        _com_release(p_dev)
+        if hr != 0 or not p_mgr:
+            return None
+        # IAudioSessionManager2::GetSessionEnumerator
+        hr = _com_method(p_mgr, 5, ctypes.HRESULT, c_void_p,
+                         ctypes.POINTER(c_void_p))(p_mgr, byref(p_enum_s))
+        _com_release(p_mgr)
+        if hr != 0 or not p_enum_s:
+            return None
+        count = ctypes.c_int()
+        if _com_method(p_enum_s, 3, ctypes.HRESULT, c_void_p,
+                       ctypes.POINTER(ctypes.c_int))(p_enum_s, byref(count)) != 0:
+            return None
+        iid_c2 = _guid_from_str(_IID_IAUDIO_SESSION_CONTROL2)
+        iid_meter = _guid_from_str(_IID_IAUDIO_METER_INFORMATION)
+        for i in range(count.value):
+            p_ctrl, p_c2, p_meter = c_void_p(), c_void_p(), c_void_p()
+            if _com_method(p_enum_s, 4, ctypes.HRESULT, c_void_p, ctypes.c_int,
+                           ctypes.POINTER(c_void_p))(p_enum_s, i, byref(p_ctrl)) != 0:
+                continue
+            try:
+                _com_method(p_ctrl, 0, ctypes.HRESULT, c_void_p,
+                            ctypes.POINTER(GUID), ctypes.POINTER(c_void_p))(
+                    p_ctrl, byref(iid_c2), byref(p_c2))
+                # GetProcessId 的槽位在新版 Windows 上会移动（实测 12 或 14 都出现过），
+                # 哪个槽位读出"进程表里真实存在的 pid"就用哪个
+                session_pid = None
+                if p_c2:
+                    for slot in (14, 12):
+                        v = ctypes.c_ulong()
+                        try:
+                            _com_method(p_c2, slot, ctypes.HRESULT, c_void_p,
+                                        ctypes.POINTER(ctypes.c_ulong))(
+                                p_c2, byref(v))
+                        except OSError:
+                            continue
+                        if v.value in pids:
+                            session_pid = v.value
+                            break
+                if session_pid is None:
+                    continue
+                _com_method(p_ctrl, 0, ctypes.HRESULT, c_void_p,
+                            ctypes.POINTER(GUID), ctypes.POINTER(c_void_p))(
+                    p_ctrl, byref(iid_meter), byref(p_meter))
+                if p_meter:
+                    val = ctypes.c_float()
+                    if _com_method(p_meter, 3, ctypes.HRESULT, c_void_p,
+                                   ctypes.POINTER(ctypes.c_float))(
+                        p_meter, byref(val)) == 0:
+                        peak = max(peak or 0.0, val.value)
+            finally:
+                _com_release(p_c2)
+                _com_release(p_meter)
+                _com_release(p_ctrl)
+        return peak
+    except Exception:
+        return peak if peak is not None else None
+    finally:
+        _com_release(p_enum_s)
 
 
 def _query_music() -> bool:
-    """有没有在放 aespa：先问系统媒体会话，读不到就看播放器窗口（含隐藏的）。"""
+    """有没有在放 aespa：先问系统媒体会话；读不到就看播放器窗口（含隐藏的），
+    标题对上后还要验证播放器此刻真的在出声（暂停/静音就不跳）。"""
     try:
         line = (_ps(MUSIC_SMTC_PS, timeout=15).stdout or "").strip()
     except Exception:
@@ -594,7 +709,13 @@ def _query_music() -> bool:
         return len(parts) == 3 and _match_aespa(parts[1], parts[2])
     if line == "SMTC_NONE":
         return False   # SMTC 可信：媒体会话正常但没在放
-    return _scan_player_windows()   # SMTC_PARTIAL / 查询失败
+    hit_pids = _scan_player_windows()   # SMTC_PARTIAL / 查询失败
+    if not hit_pids:
+        return False
+    peak = _process_peak(hit_pids)
+    if peak is None:
+        return True   # 音量峰值读不到就以标题为准
+    return peak > 0.02
 
 
 def boot_signature() -> str:
@@ -1461,15 +1582,10 @@ def _create_ui_font():
                              "Microsoft YaHei UI")
 
 
-def _lp_str(s: str):
-    """把字符串包成 SendMessage 的 LPARAM（CB_ADDSTRING 用）。"""
-    return LPARAM(ctypes.cast(ctypes.c_wchar_p(s), ctypes.c_void_p).value)
-
-
 class SettingsWindow:
     """珉鸟设置：Key / 城市 / 尺寸 / 各开关，保存后即时生效。"""
 
-    CLIENT_W, CLIENT_H = 484, 424
+    CLIENT_W, CLIENT_H = 484, 384
     ID_SAVE, ID_CANCEL = 1, 2
     ID_KEY, ID_CITY, ID_SIZE, ID_STEP = 2001, 2002, 2003, 2004
     ID_WALK, ID_WWIN, ID_ANIM, ID_TOP = 2101, 2102, 2103, 2104
@@ -1522,46 +1638,58 @@ class SettingsWindow:
         step = self.app._balance_step()
         add = self._add
 
-        add("STATIC", "DeepSeek API Key（不填就只有桌宠功能）：", 0, 18, 16, 400, 20, 0)
-        add("EDIT", cfg.get("deepseek_api_key") or "",
-            WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 18, 40, 448, 24, self.ID_KEY)
-        add("STATIC", "城市（天气用，留空自动定位）：", 0, 18, 76, 400, 20, 0)
+        # 城市（常用）放最上面，DeepSeek Key 是可选项放下面
+        add("STATIC", "城市（天气用，留空自动定位）：", 0, 18, 16, 400, 20, 0)
         add("EDIT", cfg.get("city") or "",
-            WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 18, 100, 448, 24, self.ID_CITY)
+            WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 18, 40, 448, 24, self.ID_CITY)
 
-        add("STATIC", "尺寸：", 0, 18, 140, 60, 20, 0)
+        add("STATIC", "尺寸：", 0, 18, 84, 60, 20, 0)
         combo_size = add("COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP,
-                         84, 138, 120, 200, self.ID_SIZE)
-        add("STATIC", "余额提醒台阶：", 0, 228, 140, 110, 20, 0)
+                         84, 82, 120, 160, self.ID_SIZE)
+        add("STATIC", "余额提醒台阶：", 0, 228, 84, 110, 20, 0)
         combo_step = add("COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP,
-                         342, 138, 124, 200, self.ID_STEP)
+                         342, 82, 124, 160, self.ID_STEP)
 
+        # 下拉项的字符串缓冲区必须保活到发送完成，且要传字符串数据本身的
+        # 地址（不是指针变量的地址），否则下拉框显示乱码
+        self._keepalive = []
         for label, px in SIZE_PRESETS:
-            user32.SendMessageW(combo_size, CB_ADDSTRING, 0, _lp_str(label))
+            p = ctypes.c_wchar_p(label)
+            self._keepalive.append(p)
+            user32.SendMessageW(combo_size, CB_ADDSTRING, 0,
+                                LPARAM(ctypes.cast(p, ctypes.c_void_p).value))
             if px == self.app.pet.display_h:
                 user32.SendMessageW(combo_size, CB_SETCURSEL,
-                                    [p for _, p in SIZE_PRESETS].index(px), 0)
+                                    [p2 for _, p2 in SIZE_PRESETS].index(px), 0)
         for label, val in (("关", 0.0), ("每花 ¥1", 1.0),
                            ("每花 ¥5", 5.0), ("每花 ¥10", 10.0)):
-            user32.SendMessageW(combo_step, CB_ADDSTRING, 0, _lp_str(label))
+            p = ctypes.c_wchar_p(label)
+            self._keepalive.append(p)
+            user32.SendMessageW(combo_step, CB_ADDSTRING, 0,
+                                LPARAM(ctypes.cast(p, ctypes.c_void_p).value))
             if val == step:
                 user32.SendMessageW(combo_step, CB_SETCURSEL,
                                     (0.0, 1.0, 5.0, 10.0).index(val), 0)
 
-        add("BUTTON", "自己散步", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 184, 220, 24,
+        add("BUTTON", "自己散步", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 126, 220, 24,
             self.ID_WALK)
-        add("BUTTON", "能在窗口上走", BS_AUTOCHECKBOX | WS_TABSTOP, 246, 184, 220, 24,
+        add("BUTTON", "能在窗口上走", BS_AUTOCHECKBOX | WS_TABSTOP, 246, 126, 220, 24,
             self.ID_WWIN)
         add("BUTTON", "待机动画（呼吸/眨眼/歪头）", BS_AUTOCHECKBOX | WS_TABSTOP,
-            18, 216, 220, 24, self.ID_ANIM)
-        add("BUTTON", "总在最前", BS_AUTOCHECKBOX | WS_TABSTOP, 246, 216, 220, 24,
+            18, 158, 220, 24, self.ID_ANIM)
+        add("BUTTON", "总在最前", BS_AUTOCHECKBOX | WS_TABSTOP, 246, 158, 220, 24,
             self.ID_TOP)
         add("BUTTON", "听到 aespa 就跳舞", BS_AUTOCHECKBOX | WS_TABSTOP,
-            18, 248, 220, 24, self.ID_DANCE)
-        add("BUTTON", "开机自启", BS_AUTOCHECKBOX | WS_TABSTOP, 246, 248, 220, 24,
+            18, 190, 220, 24, self.ID_DANCE)
+        add("BUTTON", "开机自启", BS_AUTOCHECKBOX | WS_TABSTOP, 246, 190, 220, 24,
             self.ID_AUTOSTART)
         add("BUTTON", "每小时自动查余额（跨台阶才开口）", BS_AUTOCHECKBOX | WS_TABSTOP,
-            18, 280, 400, 24, self.ID_BALTASK)
+            18, 222, 400, 24, self.ID_BALTASK)
+
+        add("STATIC", "DeepSeek API Key（可选：余额提醒用，不填不影响桌宠）：",
+            0, 18, 262, 448, 20, 0)
+        add("EDIT", cfg.get("deepseek_api_key") or "",
+            WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 18, 286, 448, 24, self.ID_KEY)
 
         add("BUTTON", "保存", BS_DEFPUSHBUTTON | WS_TABSTOP, 310, 336, 76, 30,
             self.ID_SAVE)
@@ -2229,8 +2357,12 @@ class MinBirdApp:
         self.pet.say("设置保存好啦", 2.5)
 
     def _music_loop(self) -> None:
-        """每 5 秒查一次（纯本地：SMTC 优先，读不到就看播放器窗口标题）：
+        """每 5 秒查一次（纯本地：SMTC 优先，读不到就看播放器窗口+音频峰值）：
         发现 aespa 在放就通知主线程开跳。"""
+        try:
+            ctypes.windll.ole32.CoInitializeEx(None, 0x0)  # MTA，音频峰值查询需要
+        except Exception:
+            pass
         while True:
             if self._dance_enabled:
                 try:
