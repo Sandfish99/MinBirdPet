@@ -153,6 +153,7 @@ from minbird.platform.boot import boot_signature  # noqa: F401
 from minbird.platform.state import load_state, save_state
 from minbird.platform.memory import current_rss_mb
 from minbird.platform.fullscreen import fullscreen_hwnd
+from minbird.platform import env
 from minbird.platform.update_swap import apply_pending_update, has_prev_version, rollback  # noqa: F401
 from minbird.core.safemode import next_streak, safe_mode_required
 from minbird.settings_ui import SettingsWindow  # noqa: F401
@@ -403,6 +404,10 @@ class MinBirdApp:
         self._auto_hidden = False      # 全屏自动躲藏（区别于用户手动藏）
         self._next_fs_check = 0.0
         self._safe = bool(getattr(options, "safe", False))
+        self._degrade_reasons = env.degrade_reasons()
+        if self._degrade_reasons:
+            self.TIMER_MS = 66   # RDP/虚拟机：降帧省带宽与 CPU
+            log_line("degraded env:", ";".join(self._degrade_reasons))
         self._store = ConfigStore(CONFIG_PATH, CONFIG_DEFAULTS, log=log_line)
         self.config = self._load_config()
         if self._safe and getattr(self, "_config_broken", False):
@@ -1253,7 +1258,8 @@ class MinBirdApp:
                     log_line("memory guard:", rss, "->", rss2, "MB (limit",
                              self._MEM_LIMIT_MB, ")")
         # 窗口地面：每帧同步开关，每秒刷新一次窗口列表
-        self.surfaces.enabled = (not self._safe) and bool(
+        self.surfaces.enabled = (not self._safe) and (
+            not self._degrade_reasons) and bool(
             self.config.get("window_walk", True))
         self.surfaces.refresh(now)
         self.pet.update(dt, now)
