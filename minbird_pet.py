@@ -91,6 +91,9 @@ BI_RGB = 0
 WM_DESTROY = 0x0002
 WM_SIZE = 0x0005
 WM_TIMER = 0x0113
+WM_CLOSE = 0x0010
+WM_COMMAND = 0x0111
+WM_SETFONT = 0x0030
 WM_NCHITTEST = 0x0084
 WM_MOUSEACTIVATE = 0x0021
 WM_LBUTTONDOWN = 0x0201
@@ -147,6 +150,7 @@ ID_BALSTEP = 1012
 ID_BALTASK = 1013
 ID_WINDOWWALK = 1014
 ID_SEQANIM = 1015
+ID_DANCE = 1016
 
 TIMER_ID = 1
 
@@ -469,18 +473,68 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _run(cmd, timeout=20):
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+    return subprocess.run(cmd, capture_output=True, timeout=timeout,
                           creationflags=_NO_WINDOW)
 
 
 def _ps(script: str, timeout=30):
-    return _run(["powershell.exe", "-NoProfile", "-NonInteractive",
-                 "-ExecutionPolicy", "Bypass", "-Command", script], timeout)
+    # 统一让 PowerShell 输出 UTF-8（歌名/报错可能带中文），解码容错
+    script = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;" + script
+    r = _run(["powershell.exe", "-NoProfile", "-NonInteractive",
+              "-ExecutionPolicy", "Bypass", "-Command", script], timeout)
+    r.stdout = (r.stdout or b"").decode("utf-8", "replace")
+    r.stderr = (r.stderr or b"").decode("utf-8", "replace")
+    return r
 
 
 def _sq(s: str) -> str:
     """PowerShell 单引号字符串里把 ' 写成 ''。"""
     return str(s).replace("'", "''")
+
+
+# 系统媒体会话（SMTC）：网易云 / QQ音乐 / Spotify 等主流播放器都接入了，
+# 不用装任何依赖，问 Windows 就知道"现在谁在放什么歌"。输出 "歌手|歌名" 或空。
+MUSIC_SMTC_PS = r"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+function Await($WinRtTask, $ResultType) {
+  $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)
+  $netTask = $asTask.Invoke($null, @($WinRtTask))
+  $netTask.Wait(-1) | Out-Null
+  $netTask.Result
+}
+$mgr = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime])
+$s = $mgr.GetSessions() | Where-Object { $_.PlaybackStatus -eq 'Playing' } | Select-Object -First 1
+if ($s) {
+  $i = Await ($s.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsMediaProperties,Windows.Media.Control,ContentType=WindowsRuntime])
+  Write-Output ("{0}|{1}" -f $i.Artist, $i.Title)
+} else {
+  Write-Output ""
+}
+""".strip()
+
+AESPA_KEYS = ("aespa", "에스파")
+
+
+def _match_aespa(artist: str, title: str) -> bool:
+    hay = f"{artist} {title}".lower()
+    return any(k in hay for k in AESPA_KEYS)
+
+
+def boot_signature() -> str:
+    """本次开机的签名（系统上次启动时间）；拿不到就返回空。"""
+    try:
+        r = _ps("(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('s')",
+                timeout=25)
+        return (getattr(r, "stdout", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _date_line() -> str:
+    t = time.localtime()
+    return f"{t.tm_mon}月{t.tm_mday}日 周{'一二三四五六日'[t.tm_wday]}"
 
 
 def balance_task_enabled() -> bool:
@@ -916,6 +970,7 @@ class Pet:
         self.walk_target = None
         self.walk_speed = 46.0
         self.sleepy = False
+        self.dancing = False        # 听到 aespa 在放就摇摆
         self.alpha_mask = None      # bytes, for hit testing
         self.frame_size = (1, 1)
         self.surfaces = None        # WindowSurfaces，由 App 注入；None = 只认任务栏
@@ -1125,6 +1180,19 @@ class Pet:
             return None
         return surf.perch_at(self.fx, self.fy, PERCH_SNAP)
 
+    def start_dance(self) -> None:
+        if not self.dancing:
+            self.dancing = True
+            self.next_idle_action = time.perf_counter() + 8.0
+            self.react()
+
+    def stop_dance(self) -> None:
+        self.dancing = False
+        self.angle = 0.0
+        self.hop = 0.0
+        self.bob = 0.0
+        self.squash = (1.0, 1.0)
+
     def update(self, dt: float, now: float) -> None:
         self.t_state += dt
         wa = work_area()
@@ -1140,17 +1208,28 @@ class Pet:
                 self.walk_target = None
             else:
                 self.fy = g
-                if self.seq_mode:
+                if self.dancing:
+                    # 音乐联动：左右摇摆 + 上下蹦跳
+                    self.bob = 0.0
+                    self.hop = -abs(math.sin(now * 5.2)) * 7.0
+                    self.angle = 9.0 * math.sin(now * 3.4)
+                    beat = math.sin(now * 10.4)
+                    self.squash = (1.0 + 0.05 * beat, 1.0 - 0.05 * beat)
+                elif self.seq_mode:
                     # 呼吸/眨眼已烘进序列帧，只关掉程序化呼吸，避免双重呼吸
                     self.bob = 0.0
                     self.squash = (1.0, 1.0)
+                    self.angle *= 0.85
+                    self.hop = 0.0
                 else:
                     self.bob = -abs(math.sin(now * 1.5)) * 2.4
                     breath = 1.0 + 0.009 * math.sin(now * 1.5)
                     self.squash = (breath, 2.0 - breath)
-                self.angle *= 0.85
-                self.hop = 0.0
+                    self.angle *= 0.85
+                    self.hop = 0.0
                 self.lean = 0.0
+                if self.dancing:
+                    return  # 跳舞的时候不开小差
                 if self.options.walk and now >= self.next_idle_action:
                     self.next_idle_action = now + random.uniform(3.5, 9.0)
                     roll = random.random()
@@ -1278,6 +1357,220 @@ class Pet:
 
 
 # --------------------------------------------------------------------------
+# 设置窗口（原生 Win32 控件，零第三方依赖）
+# --------------------------------------------------------------------------
+WS_CHILD = 0x40000000
+WS_VISIBLE = 0x10000000
+WS_BORDER = 0x00800000
+WS_TABSTOP = 0x00010000
+WS_CAPTION = 0x00C00000
+WS_SYSMENU = 0x00080000
+WS_MINIMIZEBOX = 0x00020000
+ES_AUTOHSCROLL = 0x0080
+BS_AUTOCHECKBOX = 0x0003
+BS_DEFPUSHBUTTON = 0x0001
+CBS_DROPDOWNLIST = 0x0003
+BM_GETCHECK = 0x00F0
+BM_SETCHECK = 0x00F1
+CB_ADDSTRING = 0x0143
+CB_SETCURSEL = 0x014E
+CB_GETCURSEL = 0x0147
+
+
+def _create_ui_font():
+    """设置窗口用的雅黑字体句柄。"""
+    if not hasattr(gdi32, "CreateFontW"):
+        return None
+    gdi32.CreateFontW.restype = wt.HFONT
+    return gdi32.CreateFontW(-16, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0,
+                             "Microsoft YaHei UI")
+
+
+def _lp_str(s: str):
+    """把字符串包成 SendMessage 的 LPARAM（CB_ADDSTRING 用）。"""
+    return LPARAM(ctypes.cast(ctypes.c_wchar_p(s), ctypes.c_void_p).value)
+
+
+class SettingsWindow:
+    """珉鸟设置：Key / 城市 / 尺寸 / 各开关，保存后即时生效。"""
+
+    CLIENT_W, CLIENT_H = 484, 424
+    ID_SAVE, ID_CANCEL = 1, 2
+    ID_KEY, ID_CITY, ID_SIZE, ID_STEP = 2001, 2002, 2003, 2004
+    ID_WALK, ID_WWIN, ID_ANIM, ID_TOP = 2101, 2102, 2103, 2104
+    ID_DANCE, ID_AUTOSTART, ID_BALTASK = 2105, 2106, 2107
+    CLASS_NAME = "MinBirdSettingsWindow"
+
+    def __init__(self, app):
+        self.app = app
+        self.hwnd = None
+        self._font = _create_ui_font()
+        self._controls = {}
+        self._cb = WNDPROC(self._proc)
+        if not getattr(user32, "_minbird_settings_bound", False):
+            user32.SendMessageW.argtypes = [wt.HWND, ctypes.c_uint, WPARAM, LPARAM]
+            user32.SendMessageW.restype = LRESULT
+            user32.GetWindowTextW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+            user32.AdjustWindowRectEx.argtypes = [
+                ctypes.POINTER(wt.RECT), wt.DWORD, wt.BOOL, wt.DWORD]
+            user32._minbird_settings_bound = True
+        self._build()
+
+    # -- 布局 ----
+    def _build(self) -> None:
+        hinst = kernel32.GetModuleHandleW(None)
+        wc = WNDCLASSEXW()
+        wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
+        wc.lpfnWndProc = self._cb
+        wc.hInstance = hinst
+        wc.hCursor = user32.LoadCursorW(None, 32512)  # IDC_ARROW
+        wc.lpszClassName = self.CLASS_NAME
+        if not user32.RegisterClassExW(ctypes.byref(wc)):
+            if ctypes.get_last_error() != 1410:  # 1410 = 已注册
+                raise OSError("RegisterClassExW(settings) failed")
+
+        rect = wt.RECT(0, 0, self.CLIENT_W, self.CLIENT_H)
+        style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+        user32.AdjustWindowRectEx(ctypes.byref(rect), style, False, 0)
+        w = rect.right - rect.left
+        h = rect.bottom - rect.top
+        wa = work_area()
+        x = wa.left + max(0, (wa.right - wa.left - w) // 2)
+        y = wa.top + max(0, (wa.bottom - wa.top - h) // 3)
+        self.hwnd = user32.CreateWindowExW(
+            0, self.CLASS_NAME, "珉鸟设置", style | WS_VISIBLE,
+            x, y, w, h, None, None, hinst, None)
+        if not self.hwnd:
+            raise OSError("CreateWindowExW(settings) failed")
+
+        cfg = self.app.config
+        step = self.app._balance_step()
+        add = self._add
+
+        add("STATIC", "DeepSeek API Key（不填就只有桌宠功能）：", 0, 18, 16, 400, 20, 0)
+        add("EDIT", cfg.get("deepseek_api_key") or "",
+            WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 18, 40, 448, 24, self.ID_KEY)
+        add("STATIC", "城市（天气用，留空自动定位）：", 0, 18, 76, 400, 20, 0)
+        add("EDIT", cfg.get("city") or "",
+            WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 18, 100, 448, 24, self.ID_CITY)
+
+        add("STATIC", "尺寸：", 0, 18, 140, 60, 20, 0)
+        combo_size = add("COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP,
+                         84, 138, 120, 200, self.ID_SIZE)
+        add("STATIC", "余额提醒台阶：", 0, 228, 140, 110, 20, 0)
+        combo_step = add("COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP,
+                         342, 138, 124, 200, self.ID_STEP)
+
+        for label, px in SIZE_PRESETS:
+            user32.SendMessageW(combo_size, CB_ADDSTRING, 0, _lp_str(label))
+            if px == self.app.pet.display_h:
+                user32.SendMessageW(combo_size, CB_SETCURSEL,
+                                    [p for _, p in SIZE_PRESETS].index(px), 0)
+        for label, val in (("关", 0.0), ("每花 ¥1", 1.0),
+                           ("每花 ¥5", 5.0), ("每花 ¥10", 10.0)):
+            user32.SendMessageW(combo_step, CB_ADDSTRING, 0, _lp_str(label))
+            if val == step:
+                user32.SendMessageW(combo_step, CB_SETCURSEL,
+                                    (0.0, 1.0, 5.0, 10.0).index(val), 0)
+
+        add("BUTTON", "自己散步", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 184, 220, 24,
+            self.ID_WALK)
+        add("BUTTON", "能在窗口上走", BS_AUTOCHECKBOX | WS_TABSTOP, 246, 184, 220, 24,
+            self.ID_WWIN)
+        add("BUTTON", "待机动画（呼吸/眨眼/歪头）", BS_AUTOCHECKBOX | WS_TABSTOP,
+            18, 216, 220, 24, self.ID_ANIM)
+        add("BUTTON", "总在最前", BS_AUTOCHECKBOX | WS_TABSTOP, 246, 216, 220, 24,
+            self.ID_TOP)
+        add("BUTTON", "听到 aespa 就跳舞", BS_AUTOCHECKBOX | WS_TABSTOP,
+            18, 248, 220, 24, self.ID_DANCE)
+        add("BUTTON", "开机自启", BS_AUTOCHECKBOX | WS_TABSTOP, 246, 248, 220, 24,
+            self.ID_AUTOSTART)
+        add("BUTTON", "每小时自动查余额（跨台阶才开口）", BS_AUTOCHECKBOX | WS_TABSTOP,
+            18, 280, 400, 24, self.ID_BALTASK)
+
+        add("BUTTON", "保存", BS_DEFPUSHBUTTON | WS_TABSTOP, 310, 336, 76, 30,
+            self.ID_SAVE)
+        add("BUTTON", "取消", WS_TABSTOP, 394, 336, 76, 30, self.ID_CANCEL)
+
+        checks = {
+            self.ID_WALK: bool(self.app.options.walk),
+            self.ID_WWIN: bool(cfg.get("window_walk", True)),
+            self.ID_ANIM: self.app.pet.seq_mode,
+            self.ID_TOP: self.app.topmost,
+            self.ID_DANCE: self.app._dance_enabled,
+            self.ID_AUTOSTART: autostart_enabled(),
+            self.ID_BALTASK: balance_task_enabled(),
+        }
+        for cid, on in checks.items():
+            user32.SendMessageW(self._controls[cid], BM_SETCHECK, 1 if on else 0, 0)
+
+    def _add(self, cls, text, style, x, y, w, h, cid):
+        hwnd = user32.CreateWindowExW(
+            0, cls, text, WS_CHILD | WS_VISIBLE | style,
+            x, y, w, h, self.hwnd, cid, kernel32.GetModuleHandleW(None), None)
+        if self._font:
+            user32.SendMessageW(hwnd, WM_SETFONT, self._font, 1)
+        if cid:
+            self._controls[cid] = hwnd
+        return hwnd
+
+    # -- 读取控件 ----
+    def _text(self, cid: int) -> str:
+        h = self._controls[cid]
+        n = user32.GetWindowTextLengthW(h) + 1
+        buf = ctypes.create_unicode_buffer(n)
+        user32.GetWindowTextW(h, buf, n)
+        return buf.value.strip()
+
+    def _check(self, cid: int) -> bool:
+        return user32.SendMessageW(self._controls[cid], BM_GETCHECK, 0, 0) == 1
+
+    def _combo(self, cid: int) -> int:
+        return user32.SendMessageW(self._controls[cid], CB_GETCURSEL, 0, 0)
+
+    def _save(self) -> None:
+        i_size, i_step = self._combo(self.ID_SIZE), self._combo(self.ID_STEP)
+        self.app.apply_settings({
+            "key": self._text(self.ID_KEY),
+            "city": self._text(self.ID_CITY),
+            "size": SIZE_PRESETS[i_size][1] if 0 <= i_size < len(SIZE_PRESETS)
+                    else self.app.pet.display_h,
+            "step": BALANCE_STEPS[i_step] if 0 <= i_step < len(BALANCE_STEPS)
+                    else self.app._balance_step(),
+            "walk": self._check(self.ID_WALK),
+            "wwin": self._check(self.ID_WWIN),
+            "anim": self._check(self.ID_ANIM),
+            "top": self._check(self.ID_TOP),
+            "dance": self._check(self.ID_DANCE),
+            "autostart": self._check(self.ID_AUTOSTART),
+            "baltask": self._check(self.ID_BALTASK),
+        })
+        user32.EnableWindow(self.hwnd, False)  # 保存期间防手滑再点
+        try:
+            self.app.apply_settings(v)
+        finally:
+            user32.DestroyWindow(self.hwnd)
+
+    # -- 消息处理 ----
+    def _proc(self, hwnd, msg, wparam, lparam):
+        if msg == WM_COMMAND:
+            cid = wparam & 0xFFFF
+            if cid == self.ID_SAVE:
+                self._save()
+                return 0
+            if cid == self.ID_CANCEL:
+                user32.DestroyWindow(hwnd)
+                return 0
+        elif msg == WM_CLOSE:
+            user32.DestroyWindow(hwnd)
+            return 0
+        elif msg == WM_DESTROY:
+            self.app._settings_closed(self)
+            return 0
+        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+
+# --------------------------------------------------------------------------
 # application
 # --------------------------------------------------------------------------
 class MinBirdApp:
@@ -1303,6 +1596,13 @@ class MinBirdApp:
         # 余额 / 天气：后台线程查，结果丢进 outbox，主线程在 _tick 里取
         self.outbox = queue.Queue()
         self.info = minbird_info.InfoService(self.outbox)
+
+        # 设置窗口 / 音乐联动 / 开机问候
+        self._settings = None
+        self._dance_enabled = bool(self.config.get("dance_on_aespa", True))
+        self._music_playing = False
+        self._greet_at = None
+        threading.Thread(target=self._music_loop, daemon=True).start()
 
         sprite_path = find_asset(SPRITE_CANDIDATES)
         if not sprite_path:
@@ -1607,10 +1907,12 @@ class MinBirdApp:
         auto = MF_CHECKED if autostart_enabled() else 0
         wwin = MF_CHECKED if self.config.get("window_walk", True) else 0
         anim = MF_CHECKED if self.pet.seq_mode else 0
+        dance = MF_CHECKED if self._dance_enabled else 0
         user32.AppendMenuW(menu, MF_STRING, ID_REACT, "摸摸头")
         user32.AppendMenuW(menu, MF_STRING | walk, ID_TOGGLE_WALK, "自己散步")
         user32.AppendMenuW(menu, MF_STRING | wwin, ID_WINDOWWALK, "能在窗口上走")
         user32.AppendMenuW(menu, MF_STRING | anim, ID_SEQANIM, "待机动画")
+        user32.AppendMenuW(menu, MF_STRING | dance, ID_DANCE, "听到 aespa 就跳舞")
         user32.AppendMenuW(menu, MF_STRING, ID_CYCLE_SIZE,
                            f"尺寸：{self._size_label()}（点击切换）")
         user32.AppendMenuW(menu, MF_STRING | top, ID_TOPMOST, "总在最前")
@@ -1671,6 +1973,14 @@ class MinBirdApp:
                 self.pet.say("好耶，动起来" if new else "那我安安静静待着", 2.5)
             else:
                 self.pet.say("找不到动画素材啦", 2.5)
+        elif cmd == ID_DANCE:
+            self._dance_enabled = not self._dance_enabled
+            self._set_config_value("dance_on_aespa", self._dance_enabled)
+            if self._dance_enabled:
+                self.pet.say("好！放 aespa 我就蹦", 2.5)
+            else:
+                self.pet.stop_dance()
+                self.pet.say("那我就安静听歌", 2.5)
         elif cmd == ID_CYCLE_SIZE:
             sizes = [px for _, px in SIZE_PRESETS]
             idx = (sizes.index(self.pet.display_h) + 1) % len(sizes) if self.pet.display_h in sizes else 1
@@ -1785,12 +2095,90 @@ class MinBirdApp:
         self.info.submit("weather", city=(self.config.get("city") or "").strip())
 
     def _open_settings(self) -> None:
-        self._ensure_config_file()
-        self.pet.say("配置文件打开啦\n填完保存，重启珉鸟", 7.0)
+        if self._settings is not None:
+            user32.SetForegroundWindow(self._settings.hwnd)
+            return
         try:
-            os.startfile(CONFIG_PATH)  # 用系统默认程序（一般是记事本）打开
+            self._settings = SettingsWindow(self)
         except Exception:
-            self.pet.say(f"配置文件在：\n{CONFIG_PATH}", 9.0)
+            import traceback
+            log_line("settings window failed\n" + traceback.format_exc())
+            # 兜底：回到老办法，用记事本打开配置文件
+            self._ensure_config_file()
+            try:
+                os.startfile(CONFIG_PATH)
+                self.pet.say("设置窗口开不起来\n先用记事本改配置啦", 7.0)
+            except Exception:
+                self.pet.say(f"配置文件在：\n{CONFIG_PATH}", 9.0)
+            return
+        self.pet.say("设置窗口打开啦", 2.0)
+
+    def _settings_closed(self, w) -> None:
+        self._settings = None
+
+    def apply_settings(self, v: dict) -> None:
+        """设置窗口点保存：写配置 + 即时生效。"""
+        data = self._read_disk_config()
+        data.update({
+            "deepseek_api_key": v["key"],
+            "city": v["city"],
+            "size": v["size"],
+            "walk": v["walk"],
+            "window_walk": v["wwin"],
+            "seq_anim": v["anim"],
+            "dance_on_aespa": v["dance"],
+            "balance_step": v["step"],
+        })
+        self._write_config(data)
+        self.config.update(data)
+
+        self.options.walk = v["walk"]
+        if not v["walk"] and self.pet.state == "walk":
+            self.pet.state = "idle"
+        self.pet.set_seq_mode(v["anim"] and self.pet.seq is not None)
+        self._dance_enabled = v["dance"]
+        if not v["dance"]:
+            self._music_playing = False
+            self.pet.stop_dance()
+        if v["size"] != self.pet.display_h:
+            self.pet.set_size(v["size"])
+            self.surfaces.min_top = self.pet.display_h + 8
+        if v["top"] != self.topmost:
+            self._command(ID_TOPMOST)
+        if v["autostart"] != autostart_enabled():
+            set_autostart(v["autostart"])
+        task_now = self._task_enabled if self._task_enabled is not None \
+            else balance_task_enabled()
+        if v["baltask"] != bool(task_now):
+            threading.Thread(target=self._toggle_balance_task, daemon=True).start()
+        self.pet.say("设置保存好啦", 2.5)
+
+    def _music_loop(self) -> None:
+        """每 5 秒问一次系统媒体会话（SMTC，纯本地查询不联网）：
+        发现 aespa 在放就通知主线程开跳。"""
+        while True:
+            if self._dance_enabled:
+                try:
+                    line = (_ps(MUSIC_SMTC_PS, timeout=20).stdout or "").strip()
+                    playing = False
+                    if "|" in line:
+                        artist, title = line.split("|", 1)
+                        playing = _match_aespa(artist, title)
+                    if playing != self._music_playing:
+                        self._music_playing = playing
+                        self.outbox.put(("ok", "music", "1" if playing else "0", {}))
+                except Exception:
+                    pass
+            time.sleep(5.0)
+
+    def _detect_first_boot(self) -> None:
+        """对比系统启动时间签名，判断是不是本次开机后第一次启动珉鸟。"""
+        sig = boot_signature()
+        if not sig:
+            return
+        if sig != self.config.get("boot_sig"):
+            self._set_config_value("boot_sig", sig)
+            self._greet_at = time.perf_counter() + 1.0
 
     def _drain_info(self) -> None:
         """把后台线程查到的结果取回来，显示成气泡。"""
@@ -1808,6 +2196,14 @@ class MinBirdApp:
                             # 静默检查只在该提醒时才开口，否则一个字都不说
                             self.pet.react()
                             self.pet.say(line)
+                    elif task == "music":
+                        if text == "1":
+                            self.pet.start_dance()
+                            self.pet.say("听到 aespa 啦！\n蹦个迪~", 3.0)
+                        else:
+                            self.pet.stop_dance()
+                    elif task == "weather" and extra.get("with_date"):
+                        self.pet.say(f"{_date_line()}\n{text}")
                     else:
                         self.pet.say(text)
                 else:
@@ -1893,6 +2289,13 @@ class MinBirdApp:
                 self._query_balance(silent=True)
         elif self._next_auto_check is not None:
             self._next_auto_check = None
+        # 开机后第一次启动：报一次日期 + 今日天气
+        if self._greet_at is not None and now >= self._greet_at:
+            self._greet_at = None
+            self.pet.react()
+            self.pet.say(f"开机啦！今天是{_date_line()}\n看看今天天气…", 8.0)
+            self.info.submit("weather", city=(self.config.get("city") or "").strip(),
+                             with_date=True)
         # 每 2 秒看一眼本地文件（配置有没有被手工改过 + 有没有待播的余额提醒）。
         # 这是本地磁盘读取，不是网络请求 —— 珉鸟不会自己去轮询 API。
         if now - self._last_cfg_check > 2.0:
@@ -1971,6 +2374,8 @@ class MinBirdApp:
         user32.SetTimer(self.hwnd, TIMER_ID, self.TIMER_MS, None)
         # 起来 5 秒后静默查一次余额（不弹余额，只在跨过提醒台阶时才开口）
         self._start_check_at = time.perf_counter() + 5.0
+        # 开机后第一次启动的检测要查一次系统启动时间，丢后台线程
+        threading.Thread(target=self._detect_first_boot, daemon=True).start()
         if self._log:
             self._log("shown; visible=", bool(user32.IsWindowVisible(self.hwnd)))
 

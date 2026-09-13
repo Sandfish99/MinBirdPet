@@ -415,7 +415,10 @@ class InfoService:
                                  {"raw": raw, "verbose": kwargs.get("verbose", True)}))
             elif task == "weather":
                 text, city = fetch_weather(kwargs.get("city"))
-                self.outbox.put(("ok", "weather", text, {"city": city}))
+                extra = {"city": city}
+                if kwargs.get("with_date"):
+                    extra["with_date"] = True
+                self.outbox.put(("ok", "weather", text, extra))
             else:
                 self.outbox.put(("err", task, "未知任务", {}))
         except urllib.error.HTTPError as exc:
