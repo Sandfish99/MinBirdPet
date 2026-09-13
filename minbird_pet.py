@@ -146,7 +146,6 @@ from minbird.core.pet import BUBBLE_TEXTS, PERCH_SNAP, Pet, clamp  # noqa: F401 
 from minbird.core import geom
 from minbird.core.interfaces import Rect
 from minbird.platform import monitors, win32
-from minbird.platform import monitors
 from minbird.platform.autostart import autostart_enabled, autostart_target, set_autostart  # noqa: F401
 from minbird.platform.boot import boot_signature  # noqa: F401
 from minbird.platform.state import load_state, save_state
@@ -629,7 +628,7 @@ class MinBirdApp:
             except Exception:
                 pass
         wa = win32.work_area()
-        return geom.Rect(wa.left, wa.top, wa.right, wa.bottom)
+        return Rect(wa.left, wa.top, wa.right, wa.bottom)
 
     def _handle(self, hwnd, msg, wparam, lparam):
         if msg == WM_NCHITTEST:

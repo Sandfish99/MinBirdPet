@@ -282,6 +282,7 @@ def _bind_prototypes() -> None:
 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
 SWP_NOZORDER = 0x0004
 WM_DPICHANGED = 0x02E0
+WM_DISPLAYCHANGE = 0x007E
 
 
 def enable_dpi_awareness() -> str:
