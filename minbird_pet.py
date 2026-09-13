@@ -495,7 +495,7 @@ def _sq(s: str) -> str:
 # 系统媒体会话（SMTC）：网易云 / QQ音乐 / Spotify 等主流播放器都接入了，
 # 不用装任何依赖，问 Windows 就知道"现在谁在放什么歌"。
 # 输出约定：SMTC_NONE = 会话正常但没在放；SMTC_META|歌手|歌名 = 在放；
-# 空输出 = 这台机器读不到元数据（部分系统 WinRT 投影缺类型）→ 走窗口标题兜底。
+# SMTC_PARTIAL = 这台机器的 WinRT 投影读不到状态/元数据 → 走窗口标题兜底。
 MUSIC_SMTC_PS = r"""
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -509,20 +509,16 @@ function Await($WinRtTask, $ResultType) {
 }
 $mgrType = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime]
 $mgr = Await ($mgrType::RequestAsync()) $mgrType
-$s = $mgr.GetSessions() | Where-Object { $_.PlaybackStatus -eq 'Playing' } | Select-Object -First 1
+$sessions = $mgr.GetSessions()
+if ($sessions.Count -eq 0) { Write-Output "SMTC_NONE"; exit 0 }
+# 探测状态枚举能不能读：读不出来就如实报 PARTIAL，别误报"没在放"
+$status = [string]($sessions | Select-Object -First 1).PlaybackStatus
+if ([string]::IsNullOrWhiteSpace($status)) { Write-Output "SMTC_PARTIAL"; exit 0 }
+$s = $sessions | Where-Object { $_.PlaybackStatus -eq 'Playing' } | Select-Object -First 1
 if (-not $s) { Write-Output "SMTC_NONE"; exit 0 }
 $propsType = [Windows.Media.Control.GlobalSystemMediaTransportControlsMediaProperties,Windows.Media.Control,ContentType=WindowsRuntime]
 $i = Await ($s.TryGetMediaPropertiesAsync()) $propsType
 Write-Output ("SMTC_META|{0}|{1}" -f $i.Artist, $i.Title)
-""".strip()
-
-# 兜底：部分机器 WinRT 投影读不到歌曲元数据，改看播放器窗口标题
-# （QQ音乐/网易云等的窗口标题就是"歌名 - 歌手"）。
-MUSIC_TITLES_PS = r"""
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-Get-Process | Where-Object { $_.MainWindowTitle } | ForEach-Object {
-  Write-Output ("{0}::{1}" -f $_.ProcessName, $_.MainWindowTitle)
-}
 """.strip()
 
 PLAYER_PROCESSES = ("qqmusic", "cloudmusic", "kugou", "kuwo", "kwmusic",
@@ -536,31 +532,69 @@ def _match_aespa(artist: str, title: str) -> bool:
     return any(k in hay for k in AESPA_KEYS)
 
 
+TH32CS_SNAPPROCESS = 0x2
+
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [("dwSize", wt.DWORD), ("cntUsage", wt.DWORD),
+                ("th32ProcessID", wt.DWORD),
+                ("th32DefaultHeapID", ctypes.POINTER(wt.ULONG)),
+                ("th32ModuleID", wt.DWORD), ("cntThreads", wt.DWORD),
+                ("th32ParentProcessID", wt.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wt.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+
+
+def _scan_player_windows() -> bool:
+    """兜底检测：枚举所有顶层窗口（含隐藏/托盘化），已知播放器进程的
+    窗口标题里出现 aespa（标题一般是"歌名 - 歌手"）就算在放。"""
+    kernel32.CreateToolhelp32Snapshot.restype = wt.HANDLE
+    snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    pids = {}
+    if snap:
+        entry = _PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            pids[entry.th32ProcessID] = entry.szExeFile
+            ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
+        kernel32.CloseHandle(snap)
+    if not pids:
+        return False
+    hits = []
+
+    def _on_window(hwnd, _lparam):
+        pid = wt.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        exe = pids.get(pid.value, "").lower()
+        if exe and any(p in exe for p in PLAYER_PROCESSES):
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n > 0:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                user32.GetWindowTextW(hwnd, buf, n + 1)
+                left, sep, right = buf.value.strip().rpartition(" - ")
+                if sep and left and _match_aespa(left, right):
+                    hits.append(True)
+                    return False  # 命中，提前结束枚举
+        return True
+
+    cb = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)(_on_window)
+    user32.EnumWindows(cb, 0)
+    return bool(hits)
+
+
 def _query_music() -> bool:
-    """有没有在放 aespa：先问系统媒体会话，读不到再看播放器窗口标题。"""
+    """有没有在放 aespa：先问系统媒体会话，读不到就看播放器窗口（含隐藏的）。"""
     try:
         line = (_ps(MUSIC_SMTC_PS, timeout=15).stdout or "").strip()
     except Exception:
         line = ""
     if line.startswith("SMTC_META|"):
         parts = line.split("|", 2)
-        if len(parts) == 3 and _match_aespa(parts[1], parts[2]):
-            return True
-        return False   # SMTC 可信：在放但不是 aespa
-    try:
-        lines = (_ps(MUSIC_TITLES_PS, timeout=15).stdout or "").splitlines()
-    except Exception:
-        return False
-    for raw in lines:
-        proc, _, title = raw.partition("::")
-        if not title or " - " not in title:
-            continue
-        if not any(p in proc.lower() for p in PLAYER_PROCESSES):
-            continue
-        left, _, right = title.strip().rpartition(" - ")
-        if left and _match_aespa(left, right):
-            return True
-    return False
+        return len(parts) == 3 and _match_aespa(parts[1], parts[2])
+    if line == "SMTC_NONE":
+        return False   # SMTC 可信：媒体会话正常但没在放
+    return _scan_player_windows()   # SMTC_PARTIAL / 查询失败
 
 
 def boot_signature() -> str:
@@ -2235,8 +2269,7 @@ class MinBirdApp:
                             self.pet.say(line)
                     elif task == "music":
                         if text == "1":
-                            self.pet.start_dance()
-                            self.pet.say("听到 aespa 啦！\n蹦个迪~", 3.0)
+                            self.pet.start_dance()   # 只跳舞，不打扰
                         else:
                             self.pet.stop_dance()
                     elif task == "weather" and extra.get("with_date"):
