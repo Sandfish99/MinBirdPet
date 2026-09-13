@@ -1,0 +1,9 @@
+{
+ "fps": 24.15,
+ "frames": 77,
+ "frame_w": 248,
+ "frame_h": 320,
+ "cols": 9,
+ "loop_source": "frames[152:229] of 241",
+ "note": "绿幕视频自动生成：tools/make_seq.py"
+}

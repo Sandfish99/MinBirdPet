@@ -1,2 +1,7 @@
 -r requirements.txt
 pyinstaller>=6.0
+
+# 仅重新生成序列帧素材时需要（tools/make_seq.py）
+imageio
+imageio-ffmpeg
+numpy

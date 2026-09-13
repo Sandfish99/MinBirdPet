@@ -648,6 +648,31 @@ def find_asset(names) -> str | None:
     return None
 
 
+SEQ_DIR = os.path.join(ASSET_DIR, "seq")
+
+
+def load_sprite_seq() -> tuple | None:
+    """序列帧模式素材：assets/seq/{sheet.png, manifest.json}（tools/make_seq.py 生成）。
+
+    返回 (朝右帧列表, 朝左帧列表, fps)；文件缺失或损坏返回 None，回退静态图模式。
+    """
+    try:
+        with open(os.path.join(SEQ_DIR, "manifest.json"), "r", encoding="utf-8") as f:
+            m = json.load(f)
+        sheet_path = os.path.join(SEQ_DIR, "sheet.png")
+        sheet = Image.open(sheet_path).convert("RGBA")
+        fw, fh, n = int(m["frame_w"]), int(m["frame_h"]), int(m["frames"])
+        cols = int(m.get("cols", max(1, sheet.width // fw)))
+        frames = []
+        for i in range(n):
+            r, c = divmod(i, cols)
+            frames.append(sheet.crop((c * fw, r * fh, (c + 1) * fw, (r + 1) * fh)))
+        left = [f.transpose(Image.FLIP_LEFT_RIGHT) for f in frames]
+        return frames, left, float(m.get("fps", 24.0))
+    except Exception:
+        return None
+
+
 def autostart_target() -> str:
     """Command line used for the Run registry entry."""
     if getattr(sys, "frozen", False):
@@ -858,9 +883,11 @@ class Pet:
 
     GRAVITY = 2800.0
 
-    def __init__(self, sprite: Image.Image, options):
+    def __init__(self, sprite: Image.Image, options, seq: tuple | None = None):
         self.sprite_src = sprite
         self.options = options
+        self.seq = seq              # (朝右帧, 朝左帧, fps)；None = 静态图模式
+        self.seq_mode = seq is not None
         self.base_right = None
         self.base_left = None
         self.font = load_font(15)
@@ -899,6 +926,10 @@ class Pet:
         self.display_w = max(1, int(round(self.sprite_src.width * scale)))
         self.base_right = self.sprite_src.resize((self.display_w, self.display_h), Image.LANCZOS)
         self.base_left = self.base_right.transpose(Image.FLIP_LEFT_RIGHT)
+        if self.seq_mode:
+            dw, dh = self.display_w, self.display_h
+            self.seq_right = [f.resize((dw, dh), Image.LANCZOS) for f in self.seq[0]]
+            self.seq_left = [f.resize((dw, dh), Image.LANCZOS) for f in self.seq[1]]
         self.mx = 78
         self.m_top = 82
         self.m_bottom = 6
@@ -964,7 +995,11 @@ class Pet:
         sx, sy = self.squash
         w = max(1, int(round(self.display_w * sx)))
         h = max(1, int(round(self.display_h * sy)))
-        base = self.base_left if self.facing < 0 else self.base_right
+        if self.seq_mode:
+            frames = self.seq_left if self.facing < 0 else self.seq_right
+            base = frames[int(time.perf_counter() * self.seq[2]) % len(frames)]
+        else:
+            base = self.base_left if self.facing < 0 else self.base_right
         spr = base.resize((w, h), Image.BILINEAR)
 
         tile = Image.new("RGBA", (self.tile_w, self.tile_h), (0, 0, 0, 0))
@@ -1094,9 +1129,14 @@ class Pet:
                 self.walk_target = None
             else:
                 self.fy = g
-                self.bob = -abs(math.sin(now * 1.5)) * 2.4
-                breath = 1.0 + 0.009 * math.sin(now * 1.5)
-                self.squash = (breath, 2.0 - breath)
+                if self.seq_mode:
+                    # 呼吸/眨眼已烘进序列帧，只关掉程序化呼吸，避免双重呼吸
+                    self.bob = 0.0
+                    self.squash = (1.0, 1.0)
+                else:
+                    self.bob = -abs(math.sin(now * 1.5)) * 2.4
+                    breath = 1.0 + 0.009 * math.sin(now * 1.5)
+                    self.squash = (breath, 2.0 - breath)
                 self.angle *= 0.85
                 self.hop = 0.0
                 self.lean = 0.0
@@ -1259,9 +1299,14 @@ class MinBirdApp:
         sprite = Image.open(sprite_path).convert("RGBA")
         sprite = sprite.crop(sprite.getchannel("A").getbbox() or (0, 0, *sprite.size))
 
+        # 序列帧模式（assets/seq/ 由 tools/make_seq.py 生成）--static 可强制关掉
+        seq = None if getattr(options, "static", False) else load_sprite_seq()
+        if seq is not None:
+            sprite = seq[0][0]  # 用第 0 帧定宽高比
+
         options.size = self.config.get("size", options.size)
         options.walk = self.config.get("walk", options.walk)
-        self.pet = Pet(sprite, options)
+        self.pet = Pet(sprite, options, seq=seq)
         self.pet.set_size(options.size)
         self.surfaces = WindowSurfaces()
         self.pet.surfaces = self.surfaces
@@ -1978,6 +2023,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="珉鸟桌宠")
     parser.add_argument("--size", type=int, default=168, help="宠物高度（像素）")
     parser.add_argument("--no-walk", action="store_true", help="不要自己散步")
+    parser.add_argument("--static", action="store_true",
+                        help="不用序列帧动画，回退静态图模式")
     parser.add_argument("--debug", action="store_true", help="写运行日志")
     parser.add_argument("--selftest", action="store_true", help="只渲染预览图，不开窗口")
     parser.add_argument("--check-balance", action="store_true",
@@ -2013,7 +2060,8 @@ def _run_app(args) -> int:
             log_line("another instance is already running; exit")
         return 0
 
-    options = argparse.Namespace(size=args.size, walk=not args.no_walk, debug=args.debug)
+    options = argparse.Namespace(size=args.size, walk=not args.no_walk,
+                                 debug=args.debug, static=args.static)
     try:
         app = MinBirdApp(options)
         app.run()
