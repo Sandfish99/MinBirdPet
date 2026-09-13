@@ -166,6 +166,40 @@ def unit_safemode() -> bool:
     return True
 
 
+def unit_update_swap() -> bool:
+    sys.path.insert(0, str(ROOT))
+    import os, tempfile
+    from minbird.platform.update_swap import _rollback_in, _swap_in
+    with tempfile.TemporaryDirectory() as td:
+        cur = os.path.join(td, "MinBirdPet.exe")
+        pending = os.path.join(td, "MinBirdPet_new.exe")
+        prev = os.path.join(td, "MinBirdPet_prev.exe")
+        bad = os.path.join(td, "MinBirdPet_bad.exe")
+
+        # 无 pending：不动作
+        assert _swap_in(cur, pending, prev) is False
+
+        # 正常交换：cur→prev，pending→cur
+        open(cur, "wb").write(b"old")
+        open(pending, "wb").write(b"new")
+        assert _swap_in(cur, pending, prev) is True
+        assert open(cur, "rb").read() == b"new"
+        assert open(prev, "rb").read() == b"old"
+        assert not os.path.exists(pending)
+
+        # 回滚：cur→bad，prev→cur
+        assert _rollback_in(cur, prev, bad) is True
+        assert open(cur, "rb").read() == b"old"
+        assert open(bad, "rb").read() == b"new"
+
+        # 无 prev：回滚失败且现状不动（上一次回滚已消耗掉 prev）
+        assert not os.path.exists(prev)
+        data = open(cur, "rb").read()
+        assert _rollback_in(cur, prev, bad) is False
+        assert open(cur, "rb").read() == data
+    return True
+
+
 def main() -> int:
     print(f"== MinBirdPet 回归测试 ({PY}) ==")
     run("unit: aespa 匹配", unit_aespa_match)
@@ -173,6 +207,7 @@ def main() -> int:
     run("unit: 日志轮转与崩溃清理", unit_logging)
     run("unit: 配置存储（原子/备份/迁移）", unit_config_store)
     run("unit: 安全模式判定与状态文件", unit_safemode)
+    run("unit: 更新交换与回滚", unit_update_swap)
     run("unit: 序列帧开关", unit_seq_toggle)
     run("回归: 配置文件不被覆盖", cmd=["tools/test_config.py"])
     run("回归: selftest 渲染", cmd=["minbird_pet.py", "--selftest"])

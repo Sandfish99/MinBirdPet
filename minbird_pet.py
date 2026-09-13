@@ -142,6 +142,7 @@ from minbird.core.pet import BUBBLE_TEXTS, PERCH_SNAP, Pet, clamp  # noqa: F401 
 from minbird.platform.autostart import autostart_enabled, autostart_target, set_autostart  # noqa: F401
 from minbird.platform.boot import boot_signature  # noqa: F401
 from minbird.platform.state import load_state, save_state
+from minbird.platform.update_swap import apply_pending_update, has_prev_version, rollback  # noqa: F401
 from minbird.core.safemode import next_streak, safe_mode_required
 from minbird.settings_ui import SettingsWindow  # noqa: F401
 from minbird.logging_setup import (  # noqa: F401 —— 日志与崩溃捕获
@@ -1292,11 +1293,18 @@ def main(argv=None) -> int:
     parser.add_argument("--no-walk", action="store_true", help="不要自己散步")
     parser.add_argument("--static", action="store_true",
                         help="不用序列帧动画，回退静态图模式")
+    parser.add_argument("--safe", action="store_true",
+                        help="强制安全模式：静态图、关音乐联动/开机问候/自检")
+    parser.add_argument("--rollback", action="store_true",
+                        help="回退到上一个 exe 版本（需存在 MinBirdPet_prev.exe）")
     parser.add_argument("--debug", action="store_true", help="写运行日志")
     parser.add_argument("--selftest", action="store_true", help="只渲染预览图，不开窗口")
     parser.add_argument("--check-balance", action="store_true",
                         help="只查一次 DeepSeek 余额，跨过提醒台阶就写进待播队列，然后退出")
     args = parser.parse_args(argv)
+
+    if args.rollback:
+        return 0 if rollback(log_line) else 1
 
     if args.selftest:
         return selftest()
@@ -1319,6 +1327,7 @@ def _run_app(args) -> int:
         pass
 
     install_excepthook()
+    apply_pending_update(log_line)
     state_path = os.path.join(CONFIG_DIR, "runtime_state.json")
     streak = next_streak(load_state(state_path))
     safe = bool(getattr(args, "safe", False)) or safe_mode_required(streak)
