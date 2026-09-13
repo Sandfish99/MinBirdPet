@@ -1,6 +1,6 @@
 # 珉鸟桌宠 / MinBird Desktop Pet
 
-![Platform](https://img.shields.io/badge/platform-Windows-0078D6) ![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB) ![License](https://img.shields.io/badge/license-MIT-green) ![Release](https://img.shields.io/github/v/release/Sandfish99/MinBirdPet)
+![Platform](https://img.shields.io/badge/platform-Windows-0078D6) ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![License](https://img.shields.io/badge/license-MIT-green) ![Release](https://img.shields.io/github/v/release/Sandfish99/MinBirdPet)
 
 把「珉鸟」—— aespa 成员 Karina（柳智敏）的小鸟表情包形象 —— 做成一只住在 Windows 桌面上的桌宠。
 
