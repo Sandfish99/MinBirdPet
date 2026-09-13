@@ -2,7 +2,9 @@
 
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6) ![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB) ![License](https://img.shields.io/badge/license-MIT-green) ![Release](https://img.shields.io/github/v/release/Sandfish99/MinBirdPet)
 
-把「珉鸟」（人脸小鸟表情包）做成一只住在 Windows 桌面上的桌宠。
+把「珉鸟」—— aespa 成员 Karina（柳智敏）的小鸟表情包形象 —— 做成一只住在 Windows 桌面上的桌宠。
+
+> 本项目为非官方粉丝作品，与 aespa 及 SM Entertainment 无关；珉鸟形象版权归原作者及相关权利人所有。
 
 ![珉鸟](assets/_preview_light.png)
 
@@ -277,4 +279,6 @@ DeepSeek 余额
 
 ## 十、许可证
 
-本项目以 [MIT License](LICENSE) 开源。`assets/` 里的珉鸟图片来自作者自制的表情包，随项目同许可发布。
+代码部分以 [MIT License](LICENSE) 开源。
+
+`assets/` 里的珉鸟图片基于 aespa 成员 Karina（柳智敏）的粉丝表情包二次加工，**仅供参考与个人娱乐的非商业用途**，形象版权归原作者及相关权利人所有，不随 MIT 许可证授权。若有侵权，请联系移除。
