@@ -279,6 +279,7 @@ def main() -> int:
     run("兼容: RDP/VM 环境探测", unit_env_detect)
     run("兼容: 便携性/权限审计", cmd=["tools/audit_portable.py"])
     run("unit: 番茄钟核心", cmd=["tools/test_pomodoro.py"])
+    run("unit: 设置注册表", cmd=["tools/test_settings_registry.py"])
     run("unit: 序列帧开关", unit_seq_toggle)
     run("回归: 配置文件不被覆盖", cmd=["tools/test_config.py"])
     run("回归: selftest 渲染", cmd=["minbird_pet.py", "--selftest"])
