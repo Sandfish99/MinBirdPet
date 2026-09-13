@@ -162,7 +162,6 @@ from minbird.platform.fullscreen import fullscreen_hwnd
 from minbird.platform import env
 from minbird.platform.update_swap import apply_pending_update, has_prev_version, rollback  # noqa: F401
 from minbird.core.safemode import next_streak, safe_mode_required
-from minbird.settings_ui import SettingsWindow  # noqa: F401
 from minbird.logging_setup import (  # noqa: F401 —— 日志与崩溃捕获
     install_excepthook, log_line, write_crash_report)
 from minbird.config_store import ConfigStore  # 配置原子写/备份/迁移
@@ -449,7 +448,7 @@ class MinBirdApp:
         self.info = minbird_info.InfoService(self.outbox)
 
         # 设置窗口 / 音乐联动 / 开机问候（安全模式下只保留基础能力）
-        self._settings = None
+        self._settings_open = False
         self._dance_enabled = bool(self.config.get("dance_on_aespa", True))
         self._music_playing = False
         self._greet_at = None
@@ -550,6 +549,45 @@ class MinBirdApp:
             log_line("config migrate write failed")
         return data
 
+    def _open_settings(self) -> None:
+        """派生设置中心进程（独立 WebView2 主线程；改动经配置文件自动生效）。"""
+        if getattr(self, "_settings_open", False):
+            return
+        self._settings_open = True
+        try:
+            if getattr(sys, "frozen", False):
+                subprocess.Popen([sys.executable, "--settings"])
+            else:
+                subprocess.Popen([sys.executable,
+                                  os.path.abspath(sys.argv[0]), "--settings"])
+            self.pet.say("设置中心打开啦", 2.0)
+        except Exception as exc:
+            log_line("spawn settings failed:", repr(exc))
+            self.pet.say("设置中心启动失败", 3.0)
+        finally:
+            self._settings_open = False
+
+    def _settings_closed(self, w=None) -> None:
+        self._settings_open = False
+
+    def run_settings_action(self, action: str, path: str | None = None) -> None:
+        """设置中心动作（备份/恢复/重置；导出导入由 webview 提供路径）。"""
+        if action == "backup":
+            if self._store.write_atomic(self._read_disk_config()):
+                self.pet.say("配置已备份到 .bak", 2.5)
+        elif action == "restore_bak":
+            if self._store.restore_from_backup():
+                self._config_broken = False
+                self.config = self._load_config()
+                self._reapply_visual()
+                self._sync_pomodoro()
+                self.pet.say("已从备份恢复配置", 2.5)
+            else:
+                self.pet.say("没有可用的备份", 2.5)
+        elif action == "reset_all":
+            self.reset_settings()
+            self.pet.say("已恢复默认设置", 2.5)
+
     def _ensure_config_file(self) -> None:
         """保证配置文件存在且带默认字段，方便直接填 API Key。"""
         data = self._read_disk_config()
@@ -599,6 +637,8 @@ class MinBirdApp:
             return
         if new != self.config:
             self.config = new
+            self._reapply_visual()
+            self._sync_pomodoro()
             self.pet.say("配置更新啦，已经重新读取", 5.0)
 
     def _open_log(self):
@@ -1036,28 +1076,6 @@ class MinBirdApp:
         self.pet.say("看看今天天气…", 6.0)
         self.info.submit("weather", city=(self.config.get("city") or "").strip())
 
-    def _open_settings(self) -> None:
-        if self._settings is not None:
-            user32.SetForegroundWindow(self._settings.hwnd)
-            return
-        try:
-            self._settings = SettingsWindow(self)
-        except Exception:
-            import traceback
-            log_line("settings window failed\n" + traceback.format_exc())
-            # 兜底：回到老办法，用记事本打开配置文件
-            self._ensure_config_file()
-            try:
-                os.startfile(CONFIG_PATH)
-                self.pet.say("设置窗口开不起来\n先用记事本改配置啦", 7.0)
-            except Exception:
-                self.pet.say(f"配置文件在：\n{CONFIG_PATH}", 9.0)
-            return
-        self.pet.say("设置窗口打开啦", 2.0)
-
-    def _settings_closed(self, w) -> None:
-        self._settings = None
-
     def apply_settings(self, values: dict) -> None:
         """设置中心「保存」：注册表 coerce → 原子落盘 → 逐项即时生效。"""
         data = self._read_disk_config()
@@ -1083,6 +1101,9 @@ class MinBirdApp:
         self.apply_settings({key: value})
 
     def _apply_key(self, key: str, value) -> None:
+        item = sr.BY_KEY.get(key)
+        if value is None and item is not None:
+            value = sr.coerce(item, item.default)   # 配置里显式 null → 回退默认
         if key == "size":
             if int(value) != self.pet.display_h:
                 self.pet.set_size(int(value))
@@ -1160,44 +1181,12 @@ class MinBirdApp:
             self.pet.say(f"完成 {payload.get('rounds', 0)} 个番茄，休息一下！", 6.0)
 
     # -- 设置中心动作 --
-    def run_settings_action(self, action: str, owner_hwnd) -> None:
-        from minbird.settings_ui import ask_file
-        if action == "export_log":
-            path = ask_file(owner_hwnd, True, "导出日志", "minbird_pet.log")
-            if path and self.export_log_to(path):
-                self.pet.say("日志导出啦", 2.5)
-        elif action == "backup":
-            if self._store.write_atomic(self._read_disk_config()):
-                self.pet.say("配置已备份到 .bak", 2.5)
-        elif action == "restore_bak":
-            if self._store.restore_from_backup():
-                self._config_broken = False
-                self.config = self._load_config()
-                self._reapply_visual()
-                self.pet.say("已从备份恢复配置", 2.5)
-            else:
-                self.pet.say("没有可用的备份", 2.5)
-        elif action == "export_cfg":
-            path = ask_file(owner_hwnd, True, "导出配置", "minbird_config.json")
-            if path and self.export_config_to(path):
-                self.pet.say("配置导出啦", 2.5)
-        elif action == "import_cfg":
-            path = ask_file(owner_hwnd, False, "导入配置", "minbird_config.json")
-            if path and self.import_config_from(path):
-                self.pet.say("配置导入并生效啦", 2.5)
-            else:
-                self.pet.say("导入失败\n检查文件格式？", 3.0)
-        elif action == "reset_all":
-            if user32.MessageBoxW(owner_hwnd, "恢复全部默认设置？（位置保留）",
-                                  "珉鸟设置", 0x124) == 6:  # MB_YESNO|ICONQUESTION, IDYES
-                self.reset_settings()
-                self.pet.say("已恢复默认设置", 2.5)
-
     def _reapply_visual(self) -> None:
         for key in ("size", "opacity", "topmost", "theme", "seq_anim", "walk",
                     "dnd", "click_through", "lock_position", "fullscreen_hide",
                     "window_walk", "dance"):
             self._apply_key(key, self.config.get(key))
+        self._sync_pomodoro()
 
     def export_config_to(self, path: str) -> bool:
         data, broken = self._store.read()
@@ -1566,6 +1555,23 @@ class MinBirdApp:
 # --------------------------------------------------------------------------
 # self test / preview
 # --------------------------------------------------------------------------
+def run_settings_process() -> int:
+    """设置中心独立进程：主线程跑 WebView2，直接读写配置文件；
+    珉鸟进程的配置监听（2 秒轮询）会自动应用改动。"""
+    from minbird import settings_ui
+    store = ConfigStore(CONFIG_PATH, CONFIG_DEFAULTS, log=log_line)
+    try:
+        settings_ui.open_settings(store, CONFIG_DEFAULTS, LOG_PATH)
+    except Exception:
+        import traceback
+
+        tb = traceback.format_exc()
+        nl = chr(10)
+        log_line("settings process failed" + nl + tb)
+        return 1
+    return 0
+
+
 def selftest() -> int:
     options = argparse.Namespace(size=168, walk=True)
     sprite_path = find_asset(SPRITE_CANDIDATES)
@@ -1629,6 +1635,8 @@ def main(argv=None) -> int:
                         help="不用序列帧动画，回退静态图模式")
     parser.add_argument("--safe", action="store_true",
                         help="强制安全模式：静态图、关音乐联动/开机问候/自检")
+    parser.add_argument("--settings", action="store_true",
+                        help="只运行设置中心进程（通常由珉鸟菜单派生）")
     parser.add_argument("--rollback", action="store_true",
                         help="回退到上一个 exe 版本（需存在 MinBirdPet_prev.exe）")
     parser.add_argument("--debug", action="store_true", help="写运行日志")
@@ -1639,6 +1647,9 @@ def main(argv=None) -> int:
 
     if args.rollback:
         return 0 if rollback(log_line) else 1
+
+    if args.settings:
+        return run_settings_process()
 
     if args.selftest:
         return selftest()
