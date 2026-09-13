@@ -197,7 +197,6 @@ CONFIG_DEFAULTS = (
     ("window_walk", True),
     # 设置中心新增项
     ("topmost", True),
-    ("opacity", 100),
     ("click_through", False),
     ("lock_position", False),
     ("dnd", False),
@@ -482,7 +481,6 @@ class MinBirdApp:
         self.pet.surfaces = self.surfaces
         self.surfaces.min_top = self.pet.display_h + 8
         # 设置中心：初始视觉/行为
-        self.pet.set_opacity(int(self.config.get("opacity", 100)) / 100.0)
         self.pet.set_theme(self._theme_is_dark())
         self.pet.muted = bool(self.config.get("dnd", False))
 
@@ -778,6 +776,8 @@ class MinBirdApp:
     def _on_lbutton_down(self, lparam) -> None:
         cx, cy = cursor_pos()
         wx, wy = self.pet.window_pos()
+        if self.config.get("lock_position", False):
+            return   # 锁定位置：点击穿透交给 _handle（这里整只不可拖拽）
         self._drag = {
             "offset": (cx - wx, cy - wy),
             "start": (cx, cy),
@@ -792,8 +792,6 @@ class MinBirdApp:
         self.pet.squash = (0.96, 1.06)
         user32.SetCapture(self.hwnd)
         if self._log:
-            if self.config.get("lock_position", False):
-                return
             self._log("drag start", cx, cy)
 
     def _on_mouse_move(self) -> None:
@@ -1108,8 +1106,6 @@ class MinBirdApp:
             if int(value) != self.pet.display_h:
                 self.pet.set_size(int(value))
                 self.surfaces.min_top = self.pet.display_h + 8
-        elif key == "opacity":
-            self.pet.set_opacity(int(value) / 100.0)
         elif key == "topmost":
             if bool(value) != self.topmost:
                 self._command(ID_TOPMOST)
@@ -1182,7 +1178,7 @@ class MinBirdApp:
 
     # -- 设置中心动作 --
     def _reapply_visual(self) -> None:
-        for key in ("size", "opacity", "topmost", "theme", "seq_anim", "walk",
+        for key in ("size", "topmost", "theme", "seq_anim", "walk",
                     "dnd", "click_through", "lock_position", "fullscreen_hide",
                     "window_walk", "dance"):
             self._apply_key(key, self.config.get(key))

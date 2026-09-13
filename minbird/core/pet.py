@@ -40,7 +40,6 @@ class Pet:
         # OS 依赖注入：核心层不直接调平台 API（缺省为中性占位，生产由 App 注入）
         self._work_area_fn = work_area_fn or (lambda: Rect(0, 0, 0, 0))
         self._font_provider = font_provider
-        self.opacity = 1.0            # 0.1~1.0，合成时缩放 alpha
         self.theme_dark = False       # 气泡深色主题
         self.muted = False            # 勿扰：不说话不跳舞
         self.seq_mode = seq is not None
@@ -205,10 +204,6 @@ class Pet:
         elif self.bubble_text:
             self.bubble_text = ""
 
-        if self.opacity < 1.0:
-            alpha = canvas.getchannel("A").point(
-                lambda v: int(v * self.opacity))
-            canvas.putalpha(alpha)
         return canvas
 
     def _draw_bubble(self, canvas: Image.Image, layout, top_space: int) -> None:
@@ -292,9 +287,6 @@ class Pet:
         if surf is None:
             return None
         return surf.perch_at(self.fx, self.fy, PERCH_SNAP)
-
-    def set_opacity(self, v: float) -> None:
-        self.opacity = min(1.0, max(0.1, float(v)))
 
     def set_theme(self, dark: bool) -> None:
         self.theme_dark = bool(dark)

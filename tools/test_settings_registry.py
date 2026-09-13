@@ -22,12 +22,9 @@ def test_search():
 
 def test_coerce_defaults():
     d = sr.normalized_defaults()
-    assert d["size"] == 168 and d["opacity"] == 100 and d["topmost"] is True
+    assert d["size"] == 168 and d["topmost"] is True
     assert d["pomo_focus_min"] == 25 and d["pomo_interval"] == 4
     assert d["theme"] == "跟随系统"
-    it = sr.BY_KEY["opacity"]
-    assert sr.coerce(it, 250) == 100 and sr.coerce(it, "abc") == 100
-    assert sr.coerce(it, "70%") == 70          # enum 显示值 → 实际值
     it = sr.BY_KEY["size"]
     assert sr.coerce(it, "中") == 168 and sr.coerce(it, "特大") == 300
     it = sr.BY_KEY["pomo_focus_min"]

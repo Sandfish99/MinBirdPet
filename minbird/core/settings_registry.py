@@ -34,9 +34,6 @@ ITEMS = (
     SettingItem("size", CAT_PET, "enum", "缩放",
                 default=168, choices=("小", "中", "大", "特大"),
                 choices_map=(118, 168, 232, 300), apply="size"),
-    SettingItem("opacity", CAT_PET, "enum", "透明度",
-                default=100, choices=("30%", "50%", "70%", "85%", "100%"),
-                choices_map=(30, 50, 70, 85, 100), apply="opacity"),
     SettingItem("topmost", CAT_PET, "bool", "总在最前",
                 default=True, apply="topmost"),
     SettingItem("click_through", CAT_PET, "bool", "点击穿透（整只幽灵化，仅托盘可操作）",
@@ -126,15 +123,15 @@ def coerce(item: SettingItem, value):
         lo, hi = 1, 600
         if item.key == "size":
             lo, hi = 60, 600
-        elif item.key == "opacity":
-            lo, hi = 10, 100
         elif item.key.startswith("pomo_"):
             lo, hi = 1, 180
         return min(max(v, lo), hi)
     if item.type == "enum":
         m = item.choices_map or item.choices
-        if value in m:
-            return value
+        # 前端可能回传字符串形式（如 "300"），按 str 比对返回实际类型的值
+        for mv in m:
+            if str(mv) == str(value):
+                return mv
         if value in item.choices:
             return m[item.choices.index(value)]
         return item.default
