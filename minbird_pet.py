@@ -51,6 +51,7 @@ if BASE_DIR not in sys.path:
 import minbird_info  # noqa: E402  —— 余额 / 天气服务
 from minbird.platform.win32 import (  # noqa: F401 —— 平台适配层（唯一 OS 出口）
     SWP_NOZORDER,
+    WM_DISPLAYCHANGE,
     WM_DPICHANGED,
     enable_dpi_awareness,
     AC_SRC_ALPHA,
@@ -142,6 +143,10 @@ from minbird.platform.music import query_music as _query_music  # noqa: F401
 from minbird.platform.proc import _ps, _run, _sq  # noqa: F401 —— 子进程适配
 from minbird.platform.surfaces import WindowSurfaces  # noqa: F401 —— 平台适配层
 from minbird.core.pet import BUBBLE_TEXTS, PERCH_SNAP, Pet, clamp  # noqa: F401 —— 核心层
+from minbird.core import geom
+from minbird.core.interfaces import Rect
+from minbird.platform import monitors, win32
+from minbird.platform import monitors
 from minbird.platform.autostart import autostart_enabled, autostart_target, set_autostart  # noqa: F401
 from minbird.platform.boot import boot_signature  # noqa: F401
 from minbird.platform.state import load_state, save_state
@@ -436,7 +441,8 @@ class MinBirdApp:
         options.size = self.config.get("size", options.size)
         options.walk = self.config.get("walk", options.walk)
         self.pet = Pet(sprite, options, seq=seq,
-                       work_area_fn=work_area, font_provider=load_font)
+                       work_area_fn=self._pet_work_area,
+                       font_provider=load_font)
         if seq is not None:
             # --static = 本次启动强制静态（排障用）；平时由配置 seq_anim 决定
             self.pet.seq_mode = (not getattr(options, "static", False)) and \
@@ -446,8 +452,24 @@ class MinBirdApp:
         self.pet.surfaces = self.surfaces
         self.surfaces.min_top = self.pet.display_h + 8
 
-        if self.config.get("x") is not None:
-            self.pet.place(self.config["x"], self.config["y"])
+        # 多屏兼容：绝对坐标仍在虚拟桌面内 → 原位；否则按相对坐标落回；
+        # 最后钳进珉鸟所在的显示器（热插拔/改分辨率的兜底）
+        try:
+            vx0, vy0, vx1, vy1 = monitors.virtual_screen()
+            x = float(self.config.get("x") or 0)
+            y = float(self.config.get("y") or 0)
+            inside = (vx0 <= x < vx1 and vy0 <= y < vy1) and (x or y)
+        except (TypeError, ValueError):
+            inside = False
+        if inside:
+            self.pet.place(x, y)
+        else:
+            wa = win32.work_area()
+            rx = float(self.config.get("rx") or 0.72)
+            ry = float(self.config.get("ry") or 0.85)
+            self.pet.place(*geom.point_from_relative(wa, rx, ry))
+        wa = monitors.work_area_for_point(self.pet.fx, self.pet.fy)
+        self.pet.place(*geom.clamp_into(wa, self.pet.fx, self.pet.fy))
 
         self._drag = None
         self._last_render = 0.0
@@ -509,6 +531,11 @@ class MinBirdApp:
         data["walk"] = self.options.walk
         data["x"] = self.pet.fx
         data["y"] = self.pet.fy
+        try:
+            wa = monitors.work_area_for_point(self.pet.fx, self.pet.fy)
+            data["rx"], data["ry"] = geom.relative_of(wa, self.pet.fx, self.pet.fy)
+        except Exception:
+            pass
         self._write_config(data)
         self.config = data
 
@@ -593,6 +620,17 @@ class MinBirdApp:
                 self._log("wndproc error", msg, repr(exc))
             return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
+    def _pet_work_area(self) -> Rect:
+        """珉鸟所在显示器的有效工作区（多屏；取不到回退主屏工作区）。"""
+        pet = getattr(self, "pet", None)
+        if pet is not None:
+            try:
+                return monitors.work_area_for_point(pet.fx, pet.fy)
+            except Exception:
+                pass
+        wa = win32.work_area()
+        return geom.Rect(wa.left, wa.top, wa.right, wa.bottom)
+
     def _handle(self, hwnd, msg, wparam, lparam):
         if msg == WM_NCHITTEST:
             sx = ctypes.c_short(lparam & 0xFFFF).value
@@ -601,6 +639,16 @@ class MinBirdApp:
             if self.pet.hit(sx - wx, sy - wy):
                 return HTCLIENT
             return HTTRANSPARENT
+
+        if msg == WM_DISPLAYCHANGE:
+            # 显示器热插拔 / 分辨率变化：把珉鸟重新钳回最近的屏幕
+            try:
+                wa = self._pet_work_area()
+                self.pet.place(*geom.clamp_into(wa, self.pet.fx, self.pet.fy))
+                log_line("display change; pet re-clamped to", wa)
+            except Exception:
+                pass
+            return 0
 
         if msg == WM_DPICHANGED:
             # 跨屏 DPI 变化：用系统建议位置跟过去（尺寸仍是用户设定的物理像素）

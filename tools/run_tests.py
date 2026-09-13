@@ -223,6 +223,34 @@ def unit_resource_limits() -> bool:
     return True
 
 
+def unit_multimonitor() -> bool:
+    sys.path.insert(0, str(ROOT))
+    from minbird.core import geom
+    from minbird.core.interfaces import Rect
+
+    class R:  # 最小鸭子矩形
+        def __init__(self, l, t, r, b):
+            self.left, self.top, self.right, self.bottom = l, t, r, b
+
+    wa = R(0, 0, 1920, 1040)
+    assert geom.clamp_into(wa, -50, 2000) == (8, 1038)
+    rx, ry = geom.relative_of(wa, 960, 520)
+    assert abs(rx - 0.5) < 1e-9 and abs(ry - 0.5) < 1e-9
+    x, y = geom.point_from_relative(wa, 0.25, 0.75)
+    assert abs(x - 480) < 1e-6 and abs(y - 780) < 1e-6
+
+    # 实测：本机至少一块屏，工作区在虚拟桌面内
+    from minbird.platform import monitors
+    areas = monitors.work_areas()
+    assert len(areas) >= 1
+    vx0, vy0, vx1, vy1 = monitors.virtual_screen()
+    for a in areas:
+        assert vx0 <= a.left and a.right <= vx1 and vy0 <= a.top and a.bottom <= vy1
+    pa = monitors.work_area_for_point(1, 1)
+    assert pa.right > pa.left and pa.bottom > pa.top
+    return True
+
+
 def main() -> int:
     print(f"== MinBirdPet 回归测试 ({PY}) ==")
     run("unit: aespa 匹配", unit_aespa_match)
@@ -233,6 +261,7 @@ def main() -> int:
     run("unit: 更新交换与回滚", unit_update_swap)
     run("unit: 资源限制（RSS/提醒上限）", unit_resource_limits)
     run("兼容: DPI 感知 PMv2", cmd=["tools/verify_dpi.py"])
+    run("兼容: 多显示器几何与枚举", unit_multimonitor)
     run("unit: 序列帧开关", unit_seq_toggle)
     run("回归: 配置文件不被覆盖", cmd=["tools/test_config.py"])
     run("回归: selftest 渲染", cmd=["minbird_pet.py", "--selftest"])
