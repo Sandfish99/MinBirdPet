@@ -17,6 +17,7 @@ import math
 import os
 import queue
 import random
+import shutil
 import subprocess
 import sys
 import threading
@@ -146,6 +147,8 @@ from minbird.platform.surfaces import WindowSurfaces  # noqa: F401 —— 平台
 from minbird.core.pet import BUBBLE_TEXTS, PERCH_SNAP, Pet, clamp  # noqa: F401 —— 核心层
 from minbird.core import geom
 from minbird.core.hittest import hit_test  # 逐像素命中（纯逻辑）
+from minbird.core.pomodoro import Pomodoro, PomodoroConfig
+from minbird.core import settings_registry as sr
 from minbird.core.interfaces import Rect
 from minbird.platform import monitors, win32
 from minbird.platform.autostart import autostart_enabled, autostart_target, set_autostart  # noqa: F401
@@ -190,6 +193,18 @@ CONFIG_DEFAULTS = (
     ("balance_check_minutes", 0),
     # 能不能站/走在应用窗口的顶边（标题栏）上。False = 只待在任务栏。
     ("window_walk", True),
+    # 设置中心新增项
+    ("topmost", True),
+    ("opacity", 100),
+    ("click_through", False),
+    ("lock_position", False),
+    ("dnd", False),
+    ("theme", "跟随系统"),
+    ("pomo_focus_min", 25),
+    ("pomo_short_min", 5),
+    ("pomo_long_min", 15),
+    ("pomo_interval", 4),
+    ("pomo_auto_next", True),
 )
 
 
@@ -410,6 +425,9 @@ class MinBirdApp:
             log_line("degraded env:", ";".join(self._degrade_reasons))
         self._store = ConfigStore(CONFIG_PATH, CONFIG_DEFAULTS, log=log_line)
         self.config = self._load_config()
+        self.topmost = bool(self.config.get("topmost", True))
+        self.pomodoro = Pomodoro(listener=self._on_pomo_event)
+        self._sync_pomodoro()
         if self._safe and getattr(self, "_config_broken", False):
             # 安全模式允许"显式"从 .bak 恢复配置（正常模式按契约绝不自动覆盖）
             if self._store.restore_from_backup():
@@ -460,6 +478,10 @@ class MinBirdApp:
         self.surfaces = WindowSurfaces()
         self.pet.surfaces = self.surfaces
         self.surfaces.min_top = self.pet.display_h + 8
+        # 设置中心：初始视觉/行为
+        self.pet.set_opacity(int(self.config.get("opacity", 100)) / 100.0)
+        self.pet.set_theme(self._theme_is_dark())
+        self.pet.muted = bool(self.config.get("dnd", False))
 
         # 多屏兼容：绝对坐标仍在虚拟桌面内 → 原位；否则按相对坐标落回；
         # 最后钳进珉鸟所在的显示器（热插拔/改分辨率的兜底）
@@ -642,6 +664,8 @@ class MinBirdApp:
 
     def _handle(self, hwnd, msg, wparam, lparam):
         if msg == WM_NCHITTEST:
+            if self.config.get("click_through", False):
+                return HTTRANSPARENT
             sx = ctypes.c_short(lparam & 0xFFFF).value
             sy = ctypes.c_short((lparam >> 16) & 0xFFFF).value
             wx, wy = self.pet.window_pos()
@@ -724,6 +748,8 @@ class MinBirdApp:
         self.pet.squash = (0.96, 1.06)
         user32.SetCapture(self.hwnd)
         if self._log:
+            if self.config.get("lock_position", False):
+                return
             self._log("drag start", cx, cy)
 
     def _on_mouse_move(self) -> None:
@@ -874,6 +900,7 @@ class MinBirdApp:
             self._save_config()
         elif cmd == ID_TOPMOST:
             self.topmost = not self.topmost
+            self._set_config_value("topmost", self.topmost)
             user32.SetWindowPos(self.hwnd, HWND_TOPMOST if self.topmost else HWND_NOTOPMOST,
                                 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
         elif cmd == ID_AUTOSTART:
@@ -1000,42 +1027,188 @@ class MinBirdApp:
     def _settings_closed(self, w) -> None:
         self._settings = None
 
-    def apply_settings(self, v: dict) -> None:
-        """设置窗口点保存：写配置 + 即时生效。"""
+    def apply_settings(self, values: dict) -> None:
+        """设置中心「保存」：注册表 coerce → 原子落盘 → 逐项即时生效。"""
         data = self._read_disk_config()
-        data.update({
-            "deepseek_api_key": v["key"],
-            "city": v["city"],
-            "size": v["size"],
-            "walk": v["walk"],
-            "window_walk": v["wwin"],
-            "seq_anim": v["anim"],
-            "dance_on_aespa": v["dance"],
-            "balance_step": v["step"],
-        })
+        if data == {} and getattr(self, "_config_broken", False):
+            self.pet.say("配置文件读不懂啦\n先修复 JSON 再保存", 5.0)
+            return
+        applied = {}
+        for key, value in values.items():
+            item = sr.BY_KEY.get(key)
+            if item is None:
+                continue
+            data[key] = sr.coerce(item, value)
+            applied[key] = data[key]
+        data["x"], data["y"] = self.pet.fx, self.pet.fy
         self._write_config(data)
         self.config.update(data)
+        for key, value in applied.items():
+            self._apply_key(key, value)
+        self._sync_pomodoro()
+        self.pet.say("设置已保存并生效", 2.5)
 
-        self.options.walk = v["walk"]
-        if not v["walk"] and self.pet.state == "walk":
-            self.pet.state = "idle"
-        self.pet.set_seq_mode(v["anim"] and self.pet.seq is not None)
-        self._dance_enabled = v["dance"]
-        if not v["dance"]:
-            self._music_playing = False
-            self.pet.stop_dance()
-        if v["size"] != self.pet.display_h:
-            self.pet.set_size(v["size"])
-            self.surfaces.min_top = self.pet.display_h + 8
-        if v["top"] != self.topmost:
-            self._command(ID_TOPMOST)
-        if v["autostart"] != autostart_enabled():
-            set_autostart(v["autostart"])
-        task_now = self._task_enabled if self._task_enabled is not None \
-            else balance_task_enabled()
-        if v["baltask"] != bool(task_now):
-            threading.Thread(target=self._toggle_balance_task, daemon=True).start()
-        self.pet.say("设置保存好啦", 2.5)
+    def apply_setting(self, key: str, value) -> None:
+        self.apply_settings({key: value})
+
+    def _apply_key(self, key: str, value) -> None:
+        if key == "size":
+            if int(value) != self.pet.display_h:
+                self.pet.set_size(int(value))
+                self.surfaces.min_top = self.pet.display_h + 8
+        elif key == "opacity":
+            self.pet.set_opacity(int(value) / 100.0)
+        elif key == "topmost":
+            if bool(value) != self.topmost:
+                self._command(ID_TOPMOST)
+        elif key in ("click_through", "lock_position", "fullscreen_hide",
+                     "window_walk"):
+            pass   # 对应路径每帧/每次事件即时读配置
+        elif key == "autostart":
+            if bool(value) != autostart_enabled():
+                set_autostart(bool(value))
+        elif key == "dnd":
+            self.pet.muted = bool(value)
+            if bool(value):
+                self.pet.stop_dance()
+        elif key == "walk":
+            self.options.walk = bool(value)
+            if not value and self.pet.state == "walk":
+                self.pet.state = "idle"
+        elif key == "seq_anim":
+            self.pet.set_seq_mode(bool(value) and self.pet.seq is not None)
+        elif key == "dance":
+            self._dance_enabled = bool(value)
+            if not value:
+                self._music_playing = False
+                self.pet.stop_dance()
+        elif key == "theme":
+            self.pet.set_theme(self._theme_is_dark())
+
+    def _theme_is_dark(self) -> bool:
+        """气泡主题：显式选择优先；跟随系统读 HKCU（只读，无需管理员）。"""
+        t = self.config.get("theme", "跟随系统")
+        if t == "深色":
+            return True
+        if t == "浅色":
+            return False
+        try:
+            import winreg
+            with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Themes"
+                    r"\Personalize") as k:
+                val, _ = winreg.QueryValueEx(k, "AppsUseLightTheme")
+                return val == 0
+        except OSError:
+            return False
+
+    def _sync_pomodoro(self) -> None:
+        """配置 → 番茄钟核心（双向同步的下行；核心事件经 _on_pomo_event 上行）。"""
+        cfg = self.config
+        try:
+            self.pomodoro.config = PomodoroConfig(
+                focus_sec=max(1, int(cfg.get("pomo_focus_min", 25)) * 60),
+                short_break_sec=max(1, int(cfg.get("pomo_short_min", 5)) * 60),
+                long_break_sec=max(1, int(cfg.get("pomo_long_min", 15)) * 60),
+                long_break_interval=max(1, int(cfg.get("pomo_interval", 4))))
+        except (TypeError, ValueError):
+            pass
+
+    def _on_pomo_event(self, event: str, payload: dict) -> None:
+        """番茄钟核心事件 → 气泡（勿扰/安全模式静默）。"""
+        if self._safe or self.pet.muted:
+            return
+        names = {"focus": "专注", "short_break": "短休", "long_break": "长休"}
+        if event == "phase_started":
+            name = names.get(payload.get("phase"), payload.get("phase"))
+            mins = int(payload.get("duration_sec", 0)) // 60
+            self.pet.say(f"{name}开始（{mins} 分钟）", 4.0)
+        elif event == "completed":
+            self.pet.react()
+            self.pet.say(f"完成 {payload.get('rounds', 0)} 个番茄，休息一下！", 6.0)
+
+    # -- 设置中心动作 --
+    def run_settings_action(self, action: str, owner_hwnd) -> None:
+        from minbird.settings_ui import ask_file
+        if action == "export_log":
+            path = ask_file(owner_hwnd, True, "导出日志", "minbird_pet.log")
+            if path and self.export_log_to(path):
+                self.pet.say("日志导出啦", 2.5)
+        elif action == "backup":
+            if self._store.write_atomic(self._read_disk_config()):
+                self.pet.say("配置已备份到 .bak", 2.5)
+        elif action == "restore_bak":
+            if self._store.restore_from_backup():
+                self._config_broken = False
+                self.config = self._load_config()
+                self._reapply_visual()
+                self.pet.say("已从备份恢复配置", 2.5)
+            else:
+                self.pet.say("没有可用的备份", 2.5)
+        elif action == "export_cfg":
+            path = ask_file(owner_hwnd, True, "导出配置", "minbird_config.json")
+            if path and self.export_config_to(path):
+                self.pet.say("配置导出啦", 2.5)
+        elif action == "import_cfg":
+            path = ask_file(owner_hwnd, False, "导入配置", "minbird_config.json")
+            if path and self.import_config_from(path):
+                self.pet.say("配置导入并生效啦", 2.5)
+            else:
+                self.pet.say("导入失败\n检查文件格式？", 3.0)
+        elif action == "reset_all":
+            if user32.MessageBoxW(owner_hwnd, "恢复全部默认设置？（位置保留）",
+                                  "珉鸟设置", 0x124) == 6:  # MB_YESNO|ICONQUESTION, IDYES
+                self.reset_settings()
+                self.pet.say("已恢复默认设置", 2.5)
+
+    def _reapply_visual(self) -> None:
+        for key in ("size", "opacity", "topmost", "theme", "seq_anim", "walk",
+                    "dnd", "click_through", "lock_position", "fullscreen_hide",
+                    "window_walk", "dance"):
+            self._apply_key(key, self.config.get(key))
+
+    def export_config_to(self, path: str) -> bool:
+        data, broken = self._store.read()
+        if broken:
+            return False
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=2)
+            return True
+        except OSError:
+            return False
+
+    def import_config_from(self, path: str) -> bool:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        values = {k: v for k, v in data.items()
+                  if k in sr.BY_KEY and sr.BY_KEY[k].type != "action"}
+        self.apply_settings(values)
+        return True
+
+    def export_log_to(self, path: str) -> bool:
+        try:
+            if os.path.exists(LOG_PATH):
+                shutil.copyfile(LOG_PATH, path)
+                return True
+        except OSError:
+            pass
+        return False
+
+    def reset_settings(self) -> None:
+        data = self._read_disk_config()
+        data.update(sr.normalized_defaults())
+        data["x"], data["y"] = self.pet.fx, self.pet.fy   # 位置保留
+        self._write_config(data)
+        self.config.update(data)
+        self._reapply_visual()
+        self._sync_pomodoro()
 
     def _watchdog_loop(self) -> None:
         """看门狗：主渲染循环 60 秒无心跳 → 落盘诊断后强制退出（下次进安全模式）。
@@ -1079,6 +1252,7 @@ class MinBirdApp:
                     if fails:
                         log_line("music probe recovered after", fails, "failure(s)")
                     fails = 0
+                    playing = playing and not self.config.get("dnd", False)
                     if playing != self._music_playing:
                         self._music_playing = playing
                         self.outbox.put(("ok", "music", "1" if playing else "0", {}))
@@ -1257,6 +1431,8 @@ class MinBirdApp:
                     self._mem_guard_logged = over
                     log_line("memory guard:", rss, "->", rss2, "MB (limit",
                              self._MEM_LIMIT_MB, ")")
+        # 番茄钟心跳（idle 时为 no-op；集成启停控制后驱动倒计时）
+        self.pomodoro.tick()
         # 窗口地面：每帧同步开关，每秒刷新一次窗口列表
         self.surfaces.enabled = (not self._safe) and (
             not self._degrade_reasons) and bool(

@@ -39,8 +39,11 @@ def test_apply_mapping():
     # 每个持久化项必须有生效分发键（或声明需重启）
     for i in sr.ITEMS:
         if i.type == "action":
-            continue
-        assert i.apply, f"{i.key} 缺少 apply 分发键"
+            assert i.apply, f"{i.key} 动作项必须有 apply"
+        elif i.type == "str":
+            pass  # 字符串项（Key/城市）允许仅落盘，查询时自读
+        else:
+            assert i.apply, f"{i.key} 缺少 apply 分发键"
     # 动作项必须有 apply
     for i in sr.ITEMS:
         if i.type == "action":

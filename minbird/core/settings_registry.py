@@ -52,6 +52,12 @@ ITEMS = (
                 default=True, apply="fullscreen_hide"),
     SettingItem("window_walk", CAT_BEHAVIOR, "bool", "能在窗口上走",
                 default=True, apply="window_walk"),
+    SettingItem("walk", CAT_BEHAVIOR, "bool", "自己散步",
+                default=True, apply="walk"),
+    SettingItem("seq_anim", CAT_LOOK, "bool", "待机动画（呼吸/眨眼/歪头）",
+                default=True, apply="seq_anim"),
+    SettingItem("dance_on_aespa", CAT_BEHAVIOR, "bool", "听到 aespa 就跳舞",
+                default=True, apply="dance"),
     # ---- 番茄钟 ----
     SettingItem("pomo_focus_min", CAT_POMO, "int", "专注时长（分钟）",
                 default=25, apply="pomodoro"),
@@ -68,6 +74,10 @@ ITEMS = (
                 default="跟随系统", choices=("跟随系统", "浅色", "深色"),
                 apply="theme"),
     # ---- 高级（动作 + 提示）----
+    SettingItem("deepseek_api_key", CAT_ADV, "str", "DeepSeek API Key（余额用，可不填）",
+                default=""),
+    SettingItem("city", CAT_ADV, "str", "城市（天气用，留空自动定位）",
+                default=""),
     SettingItem("act_export_log", CAT_ADV, "action", "导出日志", apply="export_log"),
     SettingItem("act_backup", CAT_ADV, "action", "立即备份配置", apply="backup"),
     SettingItem("act_restore", CAT_ADV, "action", "从备份恢复配置", apply="restore_bak"),

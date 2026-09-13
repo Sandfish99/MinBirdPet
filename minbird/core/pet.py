@@ -40,6 +40,9 @@ class Pet:
         # OS 依赖注入：核心层不直接调平台 API（缺省为中性占位，生产由 App 注入）
         self._work_area_fn = work_area_fn or (lambda: Rect(0, 0, 0, 0))
         self._font_provider = font_provider
+        self.opacity = 1.0            # 0.1~1.0，合成时缩放 alpha
+        self.theme_dark = False       # 气泡深色主题
+        self.muted = False            # 勿扰：不说话不跳舞
         self.seq_mode = seq is not None
         self.base_right = None
         self.base_left = None
@@ -202,6 +205,10 @@ class Pet:
         elif self.bubble_text:
             self.bubble_text = ""
 
+        if self.opacity < 1.0:
+            alpha = canvas.getchannel("A").point(
+                lambda v: int(v * self.opacity))
+            canvas.putalpha(alpha)
         return canvas
 
     def _draw_bubble(self, canvas: Image.Image, layout, top_space: int) -> None:
@@ -214,8 +221,10 @@ class Pet:
         if by < 2:
             by = 2
 
-        fill = (255, 255, 255, 240)
-        edge = (96, 104, 120, 255)
+        if self.theme_dark:
+            fill, edge = (45, 45, 50, 242), (200, 204, 214, 255)
+        else:
+            fill, edge = (255, 255, 255, 240), (96, 104, 120, 255)
         d.rounded_rectangle([bx, by, bx + bw, by + bh], radius=11,
                             fill=fill, outline=edge, width=2)
         # 指向鸟嘴的小尖角
@@ -226,11 +235,15 @@ class Pet:
 
         ty = by + 8
         for line in lines:
-            d.text((bx + 13, ty), line, font=self.bubble_font, fill=(38, 40, 48, 255))
+            d.text((bx + 13, ty), line, font=self.bubble_font,
+                   fill=((235, 236, 240, 255) if self.theme_dark
+                         else (38, 40, 48, 255)))
             ty += line_h
 
     # -- behaviour --------------------------------------------------------
     def say(self, text: str, seconds: float | None = None) -> None:
+        if self.muted:
+            return
         self.bubble_text = text
         if seconds is None:
             # 余额/天气这类长文本自动给足阅读时间
@@ -279,6 +292,12 @@ class Pet:
         if surf is None:
             return None
         return surf.perch_at(self.fx, self.fy, PERCH_SNAP)
+
+    def set_opacity(self, v: float) -> None:
+        self.opacity = min(1.0, max(0.1, float(v)))
+
+    def set_theme(self, dark: bool) -> None:
+        self.theme_dark = bool(dark)
 
     def start_dance(self) -> None:
         if not self.dancing:

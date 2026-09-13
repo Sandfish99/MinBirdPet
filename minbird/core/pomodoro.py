@@ -50,7 +50,7 @@ class Pomodoro:
         self._listeners = []
         if listener:
             self._listeners.append(listener)
-        self.reset()
+        self._reset_state()   # 初始状态不作为 reset 事件广播
 
     # ---- 事件 ----
     def add_listener(self, fn) -> None:
@@ -118,13 +118,16 @@ class Pomodoro:
 
     def reset(self) -> None:
         """任意状态 → idle，清空轮次。"""
+        self._reset_state()
+        self._emit("reset")
+
+    def _reset_state(self) -> None:
         self._phase = None
         self._round = 1
         self._paused = False
         self._suspended = False
         self._deadline = 0.0
         self._frozen_remaining = 0.0
-        self._emit("reset")
 
     # ---- 休眠/唤醒（宿主转发 WM_POWERBROADCAST）----
     def on_suspend(self) -> None:
