@@ -263,6 +263,7 @@ def main() -> int:
     run("兼容: DPI 感知 PMv2", cmd=["tools/verify_dpi.py"])
     run("兼容: 多显示器几何与枚举", unit_multimonitor)
     run("兼容: 全屏检测", cmd=["tools/verify_fullscreen.py"])
+    run("兼容: 点击穿透实测", cmd=["tools/verify_clickthrough.py"])
     run("unit: 序列帧开关", unit_seq_toggle)
     run("回归: 配置文件不被覆盖", cmd=["tools/test_config.py"])
     run("回归: selftest 渲染", cmd=["minbird_pet.py", "--selftest"])

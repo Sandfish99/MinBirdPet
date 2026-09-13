@@ -145,6 +145,7 @@ from minbird.platform.proc import _ps, _run, _sq  # noqa: F401 —— 子进程�
 from minbird.platform.surfaces import WindowSurfaces  # noqa: F401 —— 平台适配层
 from minbird.core.pet import BUBBLE_TEXTS, PERCH_SNAP, Pet, clamp  # noqa: F401 —— 核心层
 from minbird.core import geom
+from minbird.core.hittest import hit_test  # 逐像素命中（纯逻辑）
 from minbird.core.interfaces import Rect
 from minbird.platform import monitors, win32
 from minbird.platform.autostart import autostart_enabled, autostart_target, set_autostart  # noqa: F401
@@ -639,9 +640,8 @@ class MinBirdApp:
             sx = ctypes.c_short(lparam & 0xFFFF).value
             sy = ctypes.c_short((lparam >> 16) & 0xFFFF).value
             wx, wy = self.pet.window_pos()
-            if self.pet.hit(sx - wx, sy - wy):
-                return HTCLIENT
-            return HTTRANSPARENT
+            return hit_test(self.pet.alpha_mask, *self.pet.frame_size,
+                            sx - wx, sy - wy)
 
         if msg == WM_DISPLAYCHANGE:
             # 显示器热插拔 / 分辨率变化：把珉鸟重新钳回最近的屏幕

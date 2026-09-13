@@ -12,6 +12,7 @@ import time
 
 from PIL import Image, ImageDraw, ImageFont
 
+from minbird.core.hittest import HTCLIENT, hit_test
 from minbird.core.interfaces import Rect
 
 PERCH_SNAP = 160.0   # 下落没进窗口时，离窗沿多高以内会「扑棱」上去落住
@@ -446,13 +447,7 @@ class Pet:
 
     # -- hit test ---------------------------------------------------------
     def hit(self, cx: int, cy: int) -> bool:
-        mask = self.alpha_mask
-        if mask is None:
-            return True
-        w, h = self.frame_size
-        if not (0 <= cx < w and 0 <= cy < h):
-            return False
-        return mask[cy * w + cx] > 28
+        return hit_test(self.alpha_mask, *self.frame_size, cx, cy) == HTCLIENT
 
 
 # --------------------------------------------------------------------------
