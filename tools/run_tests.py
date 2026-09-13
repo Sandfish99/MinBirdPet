@@ -83,10 +83,30 @@ def unit_seq_toggle() -> bool:
     return True
 
 
+def unit_logging() -> bool:
+    sys.path.insert(0, str(ROOT))
+    import os, tempfile
+    import minbird.logging_setup as ls
+    with tempfile.TemporaryDirectory() as td:
+        ls.LOG_DIR = td
+        ls.LOG_PATH = os.path.join(td, "minbird_pet.log")
+        ls.LOG_MAX_BYTES = 4096
+        for i in range(200):
+            ls.log_line("x" * 64)
+        assert os.path.exists(ls.LOG_PATH + ".old"), "应发生日志轮转"
+        for i in range(8):
+            ls.write_crash_report("test", "boom%d" % i)
+        crashes = [f for f in os.listdir(os.path.join(td, "crashes"))
+                   if f.startswith("crash_")]
+        assert len(crashes) == ls.CRASH_KEEP, f"崩溃文件应保留 {ls.CRASH_KEEP} 份"
+    return True
+
+
 def main() -> int:
     print(f"== MinBirdPet 回归测试 ({PY}) ==")
     run("unit: aespa 匹配", unit_aespa_match)
     run("unit: 日期文案", unit_date_line)
+    run("unit: 日志轮转与崩溃清理", unit_logging)
     run("unit: 序列帧开关", unit_seq_toggle)
     run("回归: 配置文件不被覆盖", cmd=["tools/test_config.py"])
     run("回归: selftest 渲染", cmd=["minbird_pet.py", "--selftest"])

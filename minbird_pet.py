@@ -142,6 +142,8 @@ from minbird.core.pet import BUBBLE_TEXTS, PERCH_SNAP, Pet, clamp  # noqa: F401 
 from minbird.platform.autostart import autostart_enabled, autostart_target, set_autostart  # noqa: F401
 from minbird.platform.boot import boot_signature  # noqa: F401
 from minbird.settings_ui import SettingsWindow  # noqa: F401
+from minbird.logging_setup import (  # noqa: F401 —— 日志与崩溃捕获
+    install_excepthook, log_line, write_crash_report)
 from minbird.platform.tasks import TASK_NAME, balance_task_enabled, set_balance_task  # noqa: F401
 
 SPRITE_CANDIDATES = ("minbird.png", "minbird_flip.png")
@@ -311,16 +313,6 @@ LOG_PATH = os.path.join(CONFIG_DIR, "minbird_pet.log")
 def _date_line() -> str:
     t = time.localtime()
     return f"{t.tm_mon}月{t.tm_mday}日 周{'一二三四五六日'[t.tm_wday]}"
-
-
-def log_line(*parts) -> None:
-    """Append a diagnostic line. Safe to call from anywhere."""
-    try:
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-        with open(LOG_PATH, "a", encoding="utf-8") as fh:
-            fh.write(f"[{time.strftime('%H:%M:%S')}] " + " ".join(str(p) for p in parts) + "\n")
-    except OSError:
-        pass
 
 
 def load_font(size: int):
@@ -957,15 +949,22 @@ class MinBirdApp:
             ctypes.windll.ole32.CoInitializeEx(None, 0x0)  # MTA，音频峰值查询需要
         except Exception:
             pass
+        fails = 0
         while True:
             if self._dance_enabled:
                 try:
                     playing = _query_music()
+                    if fails:
+                        log_line("music probe recovered after", fails, "failure(s)")
+                    fails = 0
                     if playing != self._music_playing:
                         self._music_playing = playing
                         self.outbox.put(("ok", "music", "1" if playing else "0", {}))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    fails += 1
+                    # 首次 + 之后约每 3 分钟记一条，别刷爆日志
+                    if fails == 1 or fails % 36 == 0:
+                        log_line("music probe failed x", fails, repr(exc))
             time.sleep(5.0)
 
     def _detect_first_boot(self) -> None:
@@ -1277,6 +1276,7 @@ def _run_app(args) -> int:
     except Exception:
         pass
 
+    install_excepthook()
     mutex = kernel32.CreateMutexW(None, False, "MinBirdPetSingleInstance")
     err = ctypes.get_last_error()
     if args.debug:
@@ -1294,6 +1294,7 @@ def _run_app(args) -> int:
     except Exception:
         import traceback
 
+        write_crash_report("fatal", traceback.format_exc())
         log_line("FATAL\n" + traceback.format_exc())
         if args.debug:
             traceback.print_exc()
