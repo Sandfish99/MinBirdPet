@@ -200,6 +200,29 @@ def unit_update_swap() -> bool:
     return True
 
 
+def unit_resource_limits() -> bool:
+    sys.path.insert(0, str(ROOT))
+    import os, tempfile
+    from minbird.platform.memory import current_rss_mb
+    rss = current_rss_mb()
+    assert rss is not None and rss > 0, "RSS 查询应可用"
+    # alerts 队列上限：超过 50 行只留最新的
+    import minbird_pet as m
+    with tempfile.TemporaryDirectory() as td:
+        old_path, old_dir = m.ALERT_PATH, m.CONFIG_DIR
+        m.ALERT_PATH = os.path.join(td, "alerts.jsonl")
+        m.CONFIG_DIR = td
+        try:
+            for i in range(60):
+                m._append_alert(f"提醒{i}")
+            lines = open(m.ALERT_PATH, encoding="utf-8").read().splitlines()
+            assert len(lines) == 50, f"应截断到 50 行，实际 {len(lines)}"
+            assert "提醒59" in lines[-1], "应保留最新的"
+        finally:
+            m.ALERT_PATH, m.CONFIG_DIR = old_path, old_dir
+    return True
+
+
 def main() -> int:
     print(f"== MinBirdPet 回归测试 ({PY}) ==")
     run("unit: aespa 匹配", unit_aespa_match)
@@ -208,6 +231,7 @@ def main() -> int:
     run("unit: 配置存储（原子/备份/迁移）", unit_config_store)
     run("unit: 安全模式判定与状态文件", unit_safemode)
     run("unit: 更新交换与回滚", unit_update_swap)
+    run("unit: 资源限制（RSS/提醒上限）", unit_resource_limits)
     run("unit: 序列帧开关", unit_seq_toggle)
     run("回归: 配置文件不被覆盖", cmd=["tools/test_config.py"])
     run("回归: selftest 渲染", cmd=["minbird_pet.py", "--selftest"])

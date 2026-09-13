@@ -142,6 +142,7 @@ from minbird.core.pet import BUBBLE_TEXTS, PERCH_SNAP, Pet, clamp  # noqa: F401 
 from minbird.platform.autostart import autostart_enabled, autostart_target, set_autostart  # noqa: F401
 from minbird.platform.boot import boot_signature  # noqa: F401
 from minbird.platform.state import load_state, save_state
+from minbird.platform.memory import current_rss_mb
 from minbird.platform.update_swap import apply_pending_update, has_prev_version, rollback  # noqa: F401
 from minbird.core.safemode import next_streak, safe_mode_required
 from minbird.settings_ui import SettingsWindow  # noqa: F401
@@ -203,6 +204,7 @@ def _money(v) -> str:
 # 就退出。提醒写进 alerts.jsonl，桌宠在已有的本地文件轮询里顺手取走。
 # --------------------------------------------------------------------------
 ALERT_MAX_AGE = 12 * 3600.0   # 超过 12 小时的补播提醒就别念了，过时了
+ALERT_MAX_LINES = 50          # 提醒队列文件行数上限（资源限制）
 
 
 def _read_alerts():
@@ -228,6 +230,12 @@ def _append_alert(text: str) -> None:
         with open(ALERT_PATH, "a", encoding="utf-8") as fh:
             fh.write(json.dumps({"ts": time.time(), "text": text},
                                 ensure_ascii=False) + "\n")
+        # 资源上限：队列文件最多 50 行，超出只留最新的
+        with open(ALERT_PATH, "r", encoding="utf-8") as fh:
+            alines = fh.readlines()
+        if len(alines) > ALERT_MAX_LINES:
+            with open(ALERT_PATH, "w", encoding="utf-8") as fh:
+                fh.writelines(alines[-ALERT_MAX_LINES:])
     except OSError:
         pass
 
@@ -379,6 +387,9 @@ class MinBirdApp:
         self._config_mtime = None
         self._last_cfg_check = 0.0
         self._last_tick_ok = time.perf_counter()
+        self._next_mem_check = 0.0
+        self._MEM_LIMIT_MB = 512.0   # 超过先 gc，仍超则回退静态图
+        self._mem_guard_logged = False
         self._safe = bool(getattr(options, "safe", False))
         self._store = ConfigStore(CONFIG_PATH, CONFIG_DEFAULTS, log=log_line)
         self.config = self._load_config()
@@ -1000,7 +1011,9 @@ class MinBirdApp:
                     # 首次 + 之后约每 3 分钟记一条，别刷爆日志
                     if fails == 1 or fails % 36 == 0:
                         log_line("music probe failed x", fails, repr(exc))
-            time.sleep(5.0)
+            # 连续失败（多半是杀软拦 PowerShell）就退避到 5 分钟一问，
+            # 避免无意义的反复触发
+            time.sleep(5.0 if fails < 3 else 300.0)
 
     def _detect_first_boot(self) -> None:
         """对比系统启动时间签名，判断是不是本次开机后第一次启动珉鸟。"""
@@ -1133,6 +1146,22 @@ class MinBirdApp:
             self._last_cfg_check = now
             self._watch_config()
             self._drain_alerts()
+        # 内存守卫：超限先 gc，仍超就回退静态图（序列帧缓存是最大头）
+        if now >= self._next_mem_check:
+            self._next_mem_check = now + 60.0
+            rss = current_rss_mb()
+            if rss is not None and rss > self._MEM_LIMIT_MB:
+                import gc
+                gc.collect()
+                rss2 = current_rss_mb()
+                over = rss2 is not None and rss2 > self._MEM_LIMIT_MB
+                if over and self.pet.seq_mode:
+                    self.pet.set_seq_mode(False)
+                    self.pet.say("内存占用过高\n已切回静态图", 6.0)
+                if over != self._mem_guard_logged:
+                    self._mem_guard_logged = over
+                    log_line("memory guard:", rss, "->", rss2, "MB (limit",
+                             self._MEM_LIMIT_MB, ")")
         # 窗口地面：每帧同步开关，每秒刷新一次窗口列表
         self.surfaces.enabled = (not self._safe) and bool(
             self.config.get("window_walk", True))
