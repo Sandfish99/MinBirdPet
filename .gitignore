@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+
+# 本地测试产物
+tools/*_out.txt
+tools/_*.png
+assets/_selftest.png
+
+# 打包产物走 GitHub Releases 分发，不入库
+MinBirdPet.exe
+
+# 系统杂项
+Thumbs.db
+desktop.ini
