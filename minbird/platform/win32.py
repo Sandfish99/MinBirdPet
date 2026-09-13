@@ -324,4 +324,31 @@ def to_premul_bgra(img: Image.Image) -> bytes:
 # --------------------------------------------------------------------------
 
 
+
+def _guid_from_str(s: str) -> GUID:
+    g = GUID()
+    if ctypes.windll.ole32.CLSIDFromString(ctypes.c_wchar_p(s), ctypes.byref(g)) != 0:
+        raise OSError("CLSIDFromString failed")
+    return g
+
+
+def _com_method(obj, index: int, restype, *argtypes):
+    """取 COM 对象 vtable 上第 index 个方法（obj 为接口指针 c_void_p）。
+    注意先解引用槽位拿到真正的函数地址，不能把槽位地址当函数地址调用。"""
+    vtbl = ctypes.cast(obj, ctypes.POINTER(ctypes.c_void_p)).contents.value
+    fn_addr = ctypes.cast(vtbl + index * ctypes.sizeof(ctypes.c_void_p),
+                          ctypes.POINTER(ctypes.c_void_p)).contents.value
+    proto = ctypes.WINFUNCTYPE(restype, *argtypes)
+    return ctypes.cast(fn_addr, proto)
+
+
+def _com_release(obj) -> None:
+    if obj:
+        try:
+            _com_method(obj, 2, ctypes.c_ulong, ctypes.c_void_p)(obj)
+        except Exception:
+            pass
+
+
+
 # import 时完成全部原型绑定（与拆分前 minbird_pet 的模块级调用等价）
